@@ -476,6 +476,26 @@ mode included. It accepts `fractional: true`, `weights` as a dataset/upload, and
 in `stats` for a second aligned weighting raster; see the
 [formulas and limits](cli.md#fractional-coverage-and-weighting-rasters).
 
+`ZonalReducer` gives the results of `zonalStats` for arrays you compute yourself, a strip at a
+time, without building a raster first. Zones are computed once for the grid; `windows()` lists
+the `[x, y, width, height]` strips that hold zone pixels (`stripRows` rows each), and `stream()`
+reduces one band fed those strips in order, as typed arrays of `width * height` pixels, row after
+row:
+
+```js
+const reducer = new ZonalReducer(fields, width, height, transform, "EPSG:32631", { stats: ["mean", "median"] });
+const stream = reducer.stream();
+reducer.windows().forEach(([x, y, w, h], i) => {
+  const [red, nir] = readStrip(x, y, w, h); // Float64Arrays of w * h pixels
+  stream.add(i, nir.map((n, j) => (n - red[j]) / (n + red[j]))); // 0/0 is NaN, left out
+});
+const ndvi = stream.finish(); // { mean: Float64Array, median: Float64Array }, one value per field
+```
+
+`finish()` returns a `Float64Array` per statistic, NaN where a zone has no valid pixels (`count`
+and `variety` are then 0). It also takes `allTouched`, `fractional` and `layer`; weighted
+statistics need `zonalStats`.
+
 ## Native multidimensional arrays
 
 See [Native multidimensional arrays](multidim.md) for scientific groups, named dimensions,

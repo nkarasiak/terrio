@@ -276,6 +276,131 @@ pub fn zonal_stats(zones: &JsValue, rasters: &JsValue, options: JsValue) -> Resu
     vector_op(zones, |layer| terrio::ops::zonal::zonal_stats(layer, &mut sources, &options))
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct ReducerOptions {
+    stats: Option<Vec<String>>,
+    all_touched: bool,
+    fractional: bool,
+    layer: Option<String>,
+    strip_rows: Option<usize>,
+}
+
+/// Zonal statistics of arrays you produce strip by strip, equal to `zonalStats` over a raster
+/// holding the same values: the zones are computed once for the grid, then each `stream()`
+/// reduces one band, fed the `windows()` in order.
+/// Options: stats (default count, min, max, mean, sum, stddev; not the weighted ones), allTouched,
+/// fractional, layer (of a dataset with several), stripRows (rows per window).
+#[wasm_bindgen(js_name = ZonalReducer)]
+pub struct JsZonalReducer {
+    inner: terrio::ops::zonal::ZonalReducer,
+    names: Vec<String>,
+}
+
+#[wasm_bindgen(js_class = ZonalReducer)]
+impl JsZonalReducer {
+    /// `transform` is the grid's GDAL-style geotransform; `crs` may be omitted only if the zones
+    /// have none.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        zones: &JsValue,
+        width: usize,
+        height: usize,
+        transform: Vec<f64>,
+        crs: Option<String>,
+        options: JsValue,
+    ) -> Result<JsZonalReducer, JsError> {
+        use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+        let a: ReducerOptions = parse_options(&options)?;
+        let geo_transform: [f64; 6] =
+            transform.try_into().map_err(|_| JsError::new("transform must be a GDAL geotransform of 6 numbers"))?;
+        let stats = match &a.stats {
+            Some(names) => names.iter().map(|s| Statistic::parse(s)).collect::<terrio::Result<Vec<_>>>().map_err(js_err)?,
+            None => ZonalOptions::default().stats,
+        };
+        let names = a.stats.unwrap_or_else(|| stats.iter().map(|s| s.name()).collect());
+        let mut layers = input_layers(zones)?;
+        let zones = match &a.layer {
+            Some(name) => {
+                layers.drain(..).find(|l| &l.name == name).ok_or_else(|| JsError::new(&format!("no zone layer named '{name}'")))?
+            }
+            None if layers.len() == 1 => layers.remove(0),
+            None => return Err(JsError::new("the zones have several layers: choose one with the layer option")),
+        };
+        let options = ZonalOptions { fractional: a.fractional, stats, all_touched: a.all_touched, ..Default::default() };
+        let crs = crs.as_deref().map(terrio::crs::SpatialRef::parse).transpose().map_err(js_err)?.unwrap_or_default();
+        let grid = ReducerGrid { cols: width, rows: height, geo_transform, crs };
+        let inner = ZonalReducer::new(&zones, grid, &options, a.strip_rows).map_err(js_err)?;
+        Ok(Self { inner, names })
+    }
+
+    /// The windows to supply, in order, as `[x, y, width, height]`: strips of `stripRows` rows
+    /// holding zone pixels, cropped to the columns of those pixels.
+    pub fn windows(&self) -> js_sys::Array {
+        self.inner
+            .windows()
+            .iter()
+            .map(|w| JsValue::from(js_sys::Array::of4(&w.x.into(), &w.y.into(), &w.width.into(), &w.height.into())))
+            .collect()
+    }
+
+    /// The number of zone features.
+    #[wasm_bindgen(getter, js_name = featureCount)]
+    pub fn feature_count(&self) -> usize {
+        self.inner.feature_count()
+    }
+
+    /// The statistics computed, as named.
+    #[wasm_bindgen(getter)]
+    pub fn stats(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    /// A reduction of one band over `windows()`; pixels equal to `nodata`, or not finite, are
+    /// left out.
+    pub fn stream(&self, nodata: Option<f64>) -> JsZonalStream {
+        JsZonalStream { stream: Some(self.inner.stream(nodata)), names: self.names.clone() }
+    }
+}
+
+/// One band reduced by a `ZonalReducer`: `add` each window's pixels in order, then `finish`.
+#[wasm_bindgen(js_name = ZonalStream)]
+pub struct JsZonalStream {
+    stream: Option<terrio::ops::zonal::ZonalStream>,
+    names: Vec<String>,
+}
+
+#[wasm_bindgen(js_class = ZonalStream)]
+impl JsZonalStream {
+    /// Adds window number `window` (of `ZonalReducer.windows()`): a typed array of its
+    /// `width * height` pixels, row after row. Windows must come in order.
+    pub fn add(&mut self, window: usize, data: &JsValue) -> Result<(), JsError> {
+        let stream = self.stream.as_mut().ok_or_else(|| JsError::new("the stream is finished"))?;
+        stream.add(window, &crate::raster_data(data)?).map_err(js_err)
+    }
+
+    /// The statistics, as `{name: Float64Array}` with one value per zone feature, in layer
+    /// order; NaN where a zone has no valid pixels (`count` and `variety` are then 0).
+    pub fn finish(&mut self) -> Result<js_sys::Object, JsError> {
+        use terrio::FieldValue;
+        let stream = self.stream.take().ok_or_else(|| JsError::new("the stream is finished"))?;
+        let out = js_sys::Object::new();
+        for (name, column) in self.names.iter().zip(stream.finish().map_err(js_err)?) {
+            let values: Vec<f64> = column
+                .iter()
+                .map(|v| match v {
+                    FieldValue::Float(x) => *x,
+                    FieldValue::Integer(i) => *i as f64,
+                    _ => f64::NAN,
+                })
+                .collect();
+            js_sys::Reflect::set(&out, &JsValue::from_str(name), &js_sys::Float64Array::from(&values[..]))
+                .map_err(|_| JsError::new("cannot build the result"))?;
+        }
+        Ok(out)
+    }
+}
+
 /// Recursively split multipart geometries/collections in every layer; IDs restart at one.
 #[wasm_bindgen]
 pub fn singlepart(src: &JsValue) -> Result<Dataset, JsError> {
