@@ -2516,13 +2516,12 @@ def zonal_stats(
     Field-name collisions receive _2, _3, etc. suffixes.
     """
     ...
-
 @final
 class ZonalReducer:
-    """Zonal statistics of arrays you produce strip by strip, equal to ``zonal_stats`` over a
-    raster holding the same values.
+    """Zonal statistics of arrays you produce strip by strip.
 
-    The zones are computed once for the grid; each ``stream()`` then reduces one band, fed the
+    Results equal ``zonal_stats`` over a raster holding the same values. The zones are
+    computed once for the grid; each ``stream()`` then reduces one band, fed the
     ``windows()`` in order. ``stats`` are those of ``zonal_stats`` except the weighted ones.
     """
 
@@ -2541,27 +2540,36 @@ class ZonalReducer:
         strip_rows: int | None = None,
     ) -> ZonalReducer: ...
     def windows(self) -> list[_Window]:
-        """The windows to supply, in order, as ``(x, y, width, height)``: strips of ``strip_rows``
-        rows holding zone pixels, cropped to the columns of those pixels."""
+        """The windows to supply, in order, as ``(x, y, width, height)``.
+
+        Strips of ``strip_rows`` rows holding zone pixels, cropped to the columns of those pixels.
+        """
         ...
     @property
     def feature_count(self) -> int: ...
     @property
     def stats(self) -> list[str]: ...
     def stream(self, nodata: float | None = None) -> ZonalStream:
-        """A reduction of one band over ``windows()``; pixels equal to ``nodata``, or not
-        finite, are left out."""
+        """A reduction of one band over ``windows()``.
+
+        Pixels equal to ``nodata``, or not finite, are left out.
+        """
         ...
 
 @final
 class ZonalStream:
     def add(self, window: int, array: NDArray[Any]) -> None:
-        """Add window number ``window``: a 2-D array of shape ``(height, width)``, of any
-        numeric dtype and strides. Windows must come in order."""
+        """Add window number ``window``, in order.
+
+        A 2-D array of shape ``(height, width)``, of any numeric dtype and strides.
+        """
         ...
     def finish(self) -> dict[str, NDArray[Any]]:
-        """One array per statistic, a value per zone feature: int64 for ``count`` (unless
-        fractional) and ``variety``, float64 (NaN for null) for the others."""
+        """One array per statistic, a value per zone feature.
+
+        int64 for ``count`` (unless fractional) and ``variety``, float64 (NaN for null) for the
+        others.
+        """
         ...
 
 def singlepart(src: Any, *, layer: str | None = None) -> Layer:
