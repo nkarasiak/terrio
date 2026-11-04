@@ -811,11 +811,11 @@ fn window_data(pixels: &[u16], cols: usize, w: terrio::Window) -> terrio::raster
 
 /// Statistics of `l` from a reducer fed the windows of `windows(Some(7))`.
 fn reduce_arrays(l: &Layer, ds: &RasterDataset, pixels: &[u16], o: &ZonalOptions) -> Vec<Vec<V>> {
-    let reducer = terrio::ops::zonal::ZonalReducer::new(l, reducer_grid(ds), o).unwrap();
+    let reducer = terrio::ops::zonal::ZonalReducer::new(l, reducer_grid(ds), o, Some(7)).unwrap();
     assert_eq!(reducer.feature_count(), l.len());
     assert_eq!(reducer.stats(), &o.stats[..]);
-    let mut stream = reducer.stream(Some(7), Some(0.));
-    for (i, w) in reducer.windows(Some(7)).into_iter().enumerate() {
+    let mut stream = reducer.stream(Some(0.));
+    for (i, &w) in reducer.windows().iter().enumerate() {
         stream.add(i, &window_data(pixels, ds.raster.cols, w)).unwrap();
     }
     stream.finish().unwrap()
@@ -858,13 +858,13 @@ fn zonal_reducer_without_zones() {
     let o = ZonalOptions { stats: vec![S::Count, S::Mean, S::Median, S::Variety], ..Default::default() };
     let outside = l.features.remove(4);
     l.features.clear();
-    let reducer = ZonalReducer::new(&l, reducer_grid(&ds), &o).unwrap();
-    assert!(reducer.windows(None).is_empty());
-    assert_eq!(reducer.stream(None, None).finish().unwrap(), vec![Vec::<V>::new(); 4]);
+    let reducer = ZonalReducer::new(&l, reducer_grid(&ds), &o, None).unwrap();
+    assert!(reducer.windows().is_empty());
+    assert_eq!(reducer.stream(None).finish().unwrap(), vec![Vec::<V>::new(); 4]);
     l.features.push(outside);
-    let reducer = ZonalReducer::new(&l, reducer_grid(&ds), &o).unwrap();
-    assert!(reducer.windows(None).is_empty());
-    assert_eq!(reducer.stream(None, None).finish().unwrap(), [[V::Integer(0)], [V::Null], [V::Null], [V::Integer(0)]]);
+    let reducer = ZonalReducer::new(&l, reducer_grid(&ds), &o, None).unwrap();
+    assert!(reducer.windows().is_empty());
+    assert_eq!(reducer.stream(None).finish().unwrap(), [[V::Integer(0)], [V::Null], [V::Null], [V::Integer(0)]]);
 }
 
 #[test]
@@ -873,24 +873,50 @@ fn zonal_reducer_rejects_out_of_order() {
     // One zone over rows 0 to 20: three windows of 7 rows.
     l.features.truncate(1);
     l.features[0].geometry = Some(rectangle(500_000., 5_000_000. - 210., 500_100., 5_000_000.));
-    let reducer = terrio::ops::zonal::ZonalReducer::new(&l, reducer_grid(&ds), &Default::default()).unwrap();
-    let windows = reducer.windows(Some(7));
+    let reducer = terrio::ops::zonal::ZonalReducer::new(&l, reducer_grid(&ds), &Default::default(), Some(7)).unwrap();
+    let windows = reducer.windows();
     assert_eq!(windows.len(), 3);
     let data = |i: usize| window_data(&pixels, ds.raster.cols, windows[i]);
-    let e = reducer.stream(Some(7), Some(0.)).add(1, &data(1)).err().unwrap();
+    let e = reducer.stream(Some(0.)).add(1, &data(1)).err().unwrap();
     assert!(e.to_string().contains("expected window 0"), "{e}");
-    let e = reducer.stream(Some(7), Some(0.)).add(0, &terrio::raster::RasterData::U16(vec![1; 3])).err().unwrap();
+    let e = reducer.stream(Some(0.)).add(0, &terrio::raster::RasterData::U16(vec![1; 3])).err().unwrap();
     assert!(e.to_string().contains("pixels"), "{e}");
-    let mut stream = reducer.stream(Some(7), Some(0.));
+    let mut stream = reducer.stream(Some(0.));
     stream.add(0, &data(0)).unwrap();
     let e = stream.finish().err().unwrap();
     assert!(e.to_string().contains("missing windows"), "{e}");
+    let mut stream = reducer.stream(Some(0.));
+    for i in 0..3 {
+        stream.add(i, &data(i)).unwrap();
+    }
+    let e = stream.add(3, &data(2)).err().unwrap();
+    assert!(e.to_string().contains("past the last of 3"), "{e}");
 }
 
 #[test]
 fn zonal_reducer_rejects_weighted() {
     let (ds, _, l) = reducer_fixture();
     let o = ZonalOptions { stats: vec![S::WeightedMean], ..Default::default() };
-    let e = terrio::ops::zonal::ZonalReducer::new(&l, reducer_grid(&ds), &o).err().unwrap();
+    let e = terrio::ops::zonal::ZonalReducer::new(&l, reducer_grid(&ds), &o, None).err().unwrap();
     assert!(e.to_string().contains("weighted statistics need zonal_stats"), "{e}");
+}
+
+#[test]
+fn zonal_reducer_rejects_bad_grids_and_empty_stats() {
+    use terrio::ops::zonal::ZonalReducer;
+    let (ds, _, l) = reducer_fixture();
+    let new =
+        |grid, stats: Vec<S>| ZonalReducer::new(&l, grid, &ZonalOptions { stats, ..Default::default() }, None).err().unwrap().to_string();
+    let grid = |f: &dyn Fn(&mut terrio::ops::zonal::ReducerGrid)| {
+        let mut g = reducer_grid(&ds);
+        f(&mut g);
+        g
+    };
+    for g in [grid(&|g| g.cols = 0), grid(&|g| g.rows = 0)] {
+        assert!(new(g, vec![S::Count]).contains("must have pixels"));
+    }
+    for g in [grid(&|g| g.geo_transform[0] = f64::NAN), grid(&|g| g.geo_transform[1] = f64::INFINITY), grid(&|g| g.geo_transform[1] = 0.)] {
+        assert!(new(g, vec![S::Count]).contains("finite and invertible"));
+    }
+    assert!(new(reducer_grid(&ds), vec![]).contains("at least one raster band and one statistic"));
 }

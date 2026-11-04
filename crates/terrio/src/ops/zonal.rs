@@ -681,11 +681,10 @@ pub struct ZonalReducer {
 #[derive(Debug)]
 struct Reducer {
     index: index::ZoneIndex,
-    cols: usize,
-    rows: usize,
     stats: Vec<Statistic>,
     fractional: bool,
     fids: Vec<u64>,
+    windows: Vec<Window>,
 }
 
 impl Reducer {
@@ -695,29 +694,34 @@ impl Reducer {
 }
 
 impl ZonalReducer {
-    /// The zones of `zones` on `grid`, with `options`' statistics and pixel inclusion. Weighted
-    /// statistics are not supported, nor are `dst_srs` and `decimal_places` used.
-    pub fn new(zones: &Layer, grid: ReducerGrid, options: &ZonalOptions) -> Result<Self> {
+    /// The zones of `zones` on `grid`, with `options`' statistics and pixel inclusion, and the
+    /// [`windows`](Self::windows) to supply: strips of `strip_rows` rows from row 0 (by default
+    /// terrio's strip size for one f64 band of this width) that hold zone pixels, each over the
+    /// rows and columns of those pixels. Weighted statistics are not supported, nor are `dst_srs`
+    /// and `decimal_places` used.
+    pub fn new(zones: &Layer, grid: ReducerGrid, options: &ZonalOptions, strip_rows: Option<usize>) -> Result<Self> {
         if options.fractional && options.all_touched {
             return Err(Error::InvalidArgument("fractional coverage and all_touched are mutually exclusive".into()));
         }
         if options.stats.iter().any(|s| s.uses_weights()) {
             return Err(Error::InvalidArgument("weighted statistics need zonal_stats with a weighting raster".into()));
         }
+        if options.stats.is_empty() {
+            return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
+        }
         check_stats_and_zones(&options.stats, zones)?;
         let ReducerGrid { cols, rows, geo_transform, crs } = grid;
+        super::sample::check_grid(&geo_transform, cols, rows)?;
         let index = index::build(zones, &index::GridKey { cols, rows, geo_transform, crs }, options.all_touched, options.fractional)?;
         let fids = zones.features.iter().map(|f| f.fid).collect();
-        Ok(Self { inner: Arc::new(Reducer { index, cols, rows, stats: options.stats.clone(), fractional: options.fractional, fids }) })
+        let strip_rows = strip_rows.unwrap_or_else(|| super::strips::small_strip_rows(cols, 1, std::mem::size_of::<f64>(), None));
+        let windows = reduce::strip_windows(&index, rows, strip_rows.max(1));
+        Ok(Self { inner: Arc::new(Reducer { index, stats: options.stats.clone(), fractional: options.fractional, fids, windows }) })
     }
 
-    /// The windows to supply, in order: strips of `strip_rows` rows from row 0 (by default
-    /// terrio's strip size for one f64 band of this width) that hold zone pixels, each over the
-    /// rows and columns of those pixels.
-    pub fn windows(&self, strip_rows: Option<usize>) -> Vec<Window> {
-        let r = &self.inner;
-        let strip_rows = strip_rows.unwrap_or_else(|| super::strips::small_strip_rows(r.cols, 1, std::mem::size_of::<f64>(), None));
-        reduce::strip_windows(&r.index, r.rows, strip_rows.max(1))
+    /// The windows to supply, in order.
+    pub fn windows(&self) -> &[Window] {
+        &self.inner.windows
     }
 
     /// The number of features of the zone layer.
@@ -730,22 +734,16 @@ impl ZonalReducer {
         &self.inner.stats
     }
 
-    /// A reduction of one band over [`ZonalReducer::windows`]`(strip_rows)`; pixels equal to
-    /// `nodata`, or not finite, are left out.
-    pub fn stream(&self, strip_rows: Option<usize>, nodata: Option<f64>) -> ZonalStream {
-        ZonalStream {
-            windows: self.windows(strip_rows),
-            next: 0,
-            state: reduce::StreamState::new(vec![nodata], &self.inner.plan()),
-            reducer: self.inner.clone(),
-        }
+    /// A reduction of one band over [`ZonalReducer::windows`]; pixels equal to `nodata`, or not
+    /// finite, are left out.
+    pub fn stream(&self, nodata: Option<f64>) -> ZonalStream {
+        ZonalStream { next: 0, state: reduce::StreamState::new(vec![nodata], &self.inner.plan()), reducer: self.inner.clone() }
     }
 }
 
 /// One band reduced by a [`ZonalReducer`], fed its windows in order.
 pub struct ZonalStream {
     reducer: Arc<Reducer>,
-    windows: Vec<Window>,
     next: usize,
     state: reduce::StreamState,
 }
@@ -753,12 +751,19 @@ pub struct ZonalStream {
 impl ZonalStream {
     /// Adds the pixels of window `window` (row-major, `width * height` of them, of any sample
     /// type). Windows must come in order: 0, 1, 2, ...
+    ///
+    /// After an error the stream is in an undefined state (a failed `add_strip` leaves `next`
+    /// unadvanced and may have partly accumulated the window; likewise a panic caught by the
+    /// caller): do not retry, drop the stream.
     pub fn add(&mut self, window: usize, data: &RasterData) -> Result<()> {
         if window != self.next {
             return Err(Error::InvalidArgument(format!("zonal stream: got window {window}, expected window {}", self.next)));
         }
-        let Some(&w) = self.windows.get(window) else {
-            return Err(Error::InvalidArgument(format!("zonal stream: window {window} is past the last of {}", self.windows.len())));
+        let Some(&w) = self.reducer.windows.get(window) else {
+            return Err(Error::InvalidArgument(format!(
+                "zonal stream: window {window} is past the last of {}",
+                self.reducer.windows.len()
+            )));
         };
         if data.len() != w.width * w.height {
             return Err(Error::InvalidArgument(format!(

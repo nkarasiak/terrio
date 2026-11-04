@@ -2538,8 +2538,9 @@ class ZonalReducer:
         all_touched: bool = False,
         fractional: bool = False,
         layer: str | None = None,
+        strip_rows: int | None = None,
     ) -> ZonalReducer: ...
-    def windows(self, strip_rows: int | None = None) -> list[_Window]:
+    def windows(self) -> list[_Window]:
         """The windows to supply, in order, as ``(x, y, width, height)``: strips of ``strip_rows``
         rows holding zone pixels, cropped to the columns of those pixels."""
         ...
@@ -2547,11 +2548,9 @@ class ZonalReducer:
     def feature_count(self) -> int: ...
     @property
     def stats(self) -> list[str]: ...
-    def stream(
-        self, strip_rows: int | None = None, nodata: float | None = None
-    ) -> ZonalStream:
-        """A reduction of one band over ``windows(strip_rows)``; pixels equal to ``nodata``, or
-        not finite, are left out."""
+    def stream(self, nodata: float | None = None) -> ZonalStream:
+        """A reduction of one band over ``windows()``; pixels equal to ``nodata``, or not
+        finite, are left out."""
         ...
 
 @final

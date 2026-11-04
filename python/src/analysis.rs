@@ -261,6 +261,8 @@ fn zonal_stats(
 ///     all_touched: Include every pixel touched by a zone, not only those with centres inside.
 ///     fractional: Weight pixels by the fraction of them a zone covers.
 ///     layer: The layer of `zones` to use.
+///     strip_rows: Rows per strip of `windows()` (default: terrio's strip size for one float64
+///         band of this width).
 #[pyclass(module = "terrio", name = "ZonalReducer", frozen)]
 pub struct PyZonalReducer {
     inner: terrio::ops::zonal::ZonalReducer,
@@ -271,7 +273,7 @@ pub struct PyZonalReducer {
 #[pymethods]
 impl PyZonalReducer {
     #[new]
-    #[pyo3(signature = (zones, width, height, transform, crs=None, *, stats=None, all_touched=false, fractional=false, layer=None))]
+    #[pyo3(signature = (zones, width, height, transform, crs=None, *, stats=None, all_touched=false, fractional=false, layer=None, strip_rows=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -284,6 +286,7 @@ impl PyZonalReducer {
         all_touched: bool,
         fractional: bool,
         layer: Option<String>,
+        strip_rows: Option<usize>,
     ) -> PyResult<Self> {
         use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
         let parsed = match &stats {
@@ -304,15 +307,14 @@ impl PyZonalReducer {
             geo_transform: transform,
             crs: crs.map(terrio::crs::SpatialRef::parse).transpose().py()?.unwrap_or_default(),
         };
-        let inner = py.detach_result(|| ZonalReducer::new(&zones, grid, &options)).py()?;
+        let inner = py.detach_result(|| ZonalReducer::new(&zones, grid, &options, strip_rows)).py()?;
         Ok(Self { inner, stats })
     }
 
     /// The windows to supply, in order, as `(x, y, width, height)`: strips of `strip_rows` rows
     /// holding zone pixels, cropped to the columns of those pixels. Slice `array[y:y+h, x:x+w]`.
-    #[pyo3(signature = (strip_rows=None))]
-    fn windows(&self, strip_rows: Option<usize>) -> Vec<(usize, usize, usize, usize)> {
-        windows_of(&self.inner, strip_rows)
+    fn windows(&self) -> Vec<(usize, usize, usize, usize)> {
+        self.inner.windows().iter().map(|w| (w.x, w.y, w.width, w.height)).collect()
     }
 
     /// The number of zone features.
@@ -327,28 +329,36 @@ impl PyZonalReducer {
         self.stats.iter().map(|(name, _)| name.clone()).collect()
     }
 
-    /// A reduction of one band over `windows(strip_rows)` (the same `strip_rows`); pixels equal to
-    /// `nodata`, or not finite, are left out.
-    #[pyo3(signature = (strip_rows=None, nodata=None))]
-    fn stream(&self, strip_rows: Option<usize>, nodata: Option<f64>) -> PyZonalStream {
+    /// A reduction of one band over `windows()`; pixels equal to `nodata`, or not finite, are
+    /// left out.
+    #[pyo3(signature = (nodata=None))]
+    fn stream(&self, nodata: Option<f64>) -> PyZonalStream {
         PyZonalStream {
-            windows: windows_of(&self.inner, strip_rows),
-            stream: std::sync::Mutex::new(Some(self.inner.stream(strip_rows, nodata))),
+            reducer: self.inner.clone(),
+            stream: std::sync::Mutex::new(Some(self.inner.stream(nodata))),
             stats: self.stats.clone(),
         }
     }
 }
 
-fn windows_of(reducer: &terrio::ops::zonal::ZonalReducer, strip_rows: Option<usize>) -> Vec<(usize, usize, usize, usize)> {
-    reducer.windows(strip_rows).into_iter().map(|w| (w.x, w.y, w.width, w.height)).collect()
-}
-
 /// One band reduced by a `ZonalReducer`: `add` each window's array in order, then `finish`.
 #[pyclass(module = "terrio", name = "ZonalStream", frozen)]
 pub struct PyZonalStream {
-    windows: Vec<(usize, usize, usize, usize)>,
+    /// Shares the reducer's windows, for the shape check.
+    reducer: terrio::ops::zonal::ZonalReducer,
     stream: std::sync::Mutex<Option<terrio::ops::zonal::ZonalStream>>,
     stats: Vec<(String, bool)>,
+}
+
+impl PyZonalStream {
+    /// The stream, unless another thread is using it: waiting would hold this thread's GIL
+    /// against the one inside `add`, which needs it back.
+    fn lock(&self) -> PyResult<std::sync::MutexGuard<'_, Option<terrio::ops::zonal::ZonalStream>>> {
+        self.stream.try_lock().map_err(|e| match e {
+            std::sync::TryLockError::WouldBlock => crate::invalid("the stream is in use by another thread"),
+            std::sync::TryLockError::Poisoned(_) => crate::invalid("the stream is poisoned"),
+        })
+    }
 }
 
 #[pymethods]
@@ -356,9 +366,9 @@ impl PyZonalStream {
     /// Adds window number `window` (of `ZonalReducer.windows`): a 2-D array of shape
     /// `(height, width)`, of any numeric dtype and strides. Windows must come in order.
     fn add(&self, py: Python<'_>, window: usize, array: &Bound<'_, numpy::PyUntypedArray>) -> PyResult<()> {
-        let mut guard = self.stream.lock().map_err(|_| crate::invalid("the stream is poisoned"))?;
+        let mut guard = self.lock()?;
         let stream = guard.as_mut().ok_or_else(|| crate::invalid("the stream is finished"))?;
-        if let Some(&(_, _, w, h)) = self.windows.get(window) {
+        if let Some(&terrio::Window { width: w, height: h, .. }) = self.reducer.windows().get(window) {
             let shape = array.shape();
             if shape != [h, w] {
                 let got = shape.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
@@ -374,7 +384,7 @@ impl PyZonalStream {
     fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         use numpy::IntoPyArray;
         use terrio::FieldValue;
-        let stream = self.stream.lock().map_err(|_| crate::invalid("the stream is poisoned"))?.take();
+        let stream = self.lock()?.take();
         let stream = stream.ok_or_else(|| crate::invalid("the stream is finished"))?;
         let columns = py.detach_result(|| stream.finish()).py()?;
         let out = pyo3::types::PyDict::new(py);
