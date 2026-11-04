@@ -2,6 +2,7 @@
 use crate::ops::input_raster;
 use crate::vector::PyLayer;
 use crate::{Detach, PyResultExt};
+use numpy::PyUntypedArrayMethods;
 use pyo3::prelude::*;
 use std::collections::BTreeMap;
 use terrio::ops::{contour as lines, footprint as area, topology};
@@ -14,6 +15,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(check_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(make_valid, m)?)?;
     m.add_function(wrap_pyfunction!(zonal_stats, m)?)?;
+    m.add_class::<PyZonalReducer>()?;
+    m.add_class::<PyZonalStream>()?;
     m.add_function(wrap_pyfunction!(singlepart, m)?)?;
     Ok(())
 }
@@ -241,6 +244,158 @@ fn zonal_stats(
     }
     let inner = crate::with_warnings(py, || terrio::ops::zonal::zonal_stats(&zones, &mut sources, &options))?;
     Ok(PyLayer::from(inner))
+}
+
+/// Zonal statistics of arrays you produce strip by strip, equal to `zonal_stats` over a raster
+/// holding the same values: the zones are computed once for the grid, then each `stream()`
+/// reduces one band, fed the `windows()` in order.
+///
+/// Args:
+///     zones: Anything `zonal_stats` accepts (a `Layer`, a path, GeoJSON...).
+///     width: The width of the grid, in pixels.
+///     height: The height of the grid, in pixels.
+///     transform: The grid's geotransform, in GDAL's order.
+///     crs: The grid's CRS; may be omitted only if the zones have none.
+///     stats: Statistics (default: count, min, max, mean, sum, stddev); weighted ones are not
+///         supported (use `zonal_stats`).
+///     all_touched: Include every pixel touched by a zone, not only those with centres inside.
+///     fractional: Weight pixels by the fraction of them a zone covers.
+///     layer: The layer of `zones` to use.
+#[pyclass(module = "terrio", name = "ZonalReducer", frozen)]
+pub struct PyZonalReducer {
+    inner: terrio::ops::zonal::ZonalReducer,
+    /// Each statistic's name as given, and whether it is an integer column.
+    stats: Vec<(String, bool)>,
+}
+
+#[pymethods]
+impl PyZonalReducer {
+    #[new]
+    #[pyo3(signature = (zones, width, height, transform, crs=None, *, stats=None, all_touched=false, fractional=false, layer=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        zones: &Bound<'_, PyAny>,
+        width: usize,
+        height: usize,
+        transform: [f64; 6],
+        crs: Option<&str>,
+        stats: Option<Vec<String>>,
+        all_touched: bool,
+        fractional: bool,
+        layer: Option<String>,
+    ) -> PyResult<Self> {
+        use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+        let parsed = match &stats {
+            Some(names) => names.iter().map(|s| Statistic::parse(s)).collect::<terrio::Result<Vec<_>>>().py()?,
+            None => ZonalOptions::default().stats,
+        };
+        let names = stats.unwrap_or_else(|| parsed.iter().map(|s| s.name()).collect());
+        let stats = names
+            .into_iter()
+            .zip(&parsed)
+            .map(|(name, &s)| (name, (s == Statistic::Count && !fractional) || s == Statistic::Variety))
+            .collect();
+        let options = ZonalOptions { fractional, stats: parsed, all_touched, ..Default::default() };
+        let zones = crate::vector_geom::one_layer(py, zones, layer)?;
+        let grid = ReducerGrid {
+            cols: width,
+            rows: height,
+            geo_transform: transform,
+            crs: crs.map(terrio::crs::SpatialRef::parse).transpose().py()?.unwrap_or_default(),
+        };
+        let inner = py.detach_result(|| ZonalReducer::new(&zones, grid, &options)).py()?;
+        Ok(Self { inner, stats })
+    }
+
+    /// The windows to supply, in order, as `(x, y, width, height)`: strips of `strip_rows` rows
+    /// holding zone pixels, cropped to the columns of those pixels. Slice `array[y:y+h, x:x+w]`.
+    #[pyo3(signature = (strip_rows=None))]
+    fn windows(&self, strip_rows: Option<usize>) -> Vec<(usize, usize, usize, usize)> {
+        windows_of(&self.inner, strip_rows)
+    }
+
+    /// The number of zone features.
+    #[getter]
+    fn feature_count(&self) -> usize {
+        self.inner.feature_count()
+    }
+
+    /// The statistics computed, as named.
+    #[getter]
+    fn stats(&self) -> Vec<String> {
+        self.stats.iter().map(|(name, _)| name.clone()).collect()
+    }
+
+    /// A reduction of one band over `windows(strip_rows)` (the same `strip_rows`); pixels equal to
+    /// `nodata`, or not finite, are left out.
+    #[pyo3(signature = (strip_rows=None, nodata=None))]
+    fn stream(&self, strip_rows: Option<usize>, nodata: Option<f64>) -> PyZonalStream {
+        PyZonalStream {
+            windows: windows_of(&self.inner, strip_rows),
+            stream: std::sync::Mutex::new(Some(self.inner.stream(strip_rows, nodata))),
+            stats: self.stats.clone(),
+        }
+    }
+}
+
+fn windows_of(reducer: &terrio::ops::zonal::ZonalReducer, strip_rows: Option<usize>) -> Vec<(usize, usize, usize, usize)> {
+    reducer.windows(strip_rows).into_iter().map(|w| (w.x, w.y, w.width, w.height)).collect()
+}
+
+/// One band reduced by a `ZonalReducer`: `add` each window's array in order, then `finish`.
+#[pyclass(module = "terrio", name = "ZonalStream", frozen)]
+pub struct PyZonalStream {
+    windows: Vec<(usize, usize, usize, usize)>,
+    stream: std::sync::Mutex<Option<terrio::ops::zonal::ZonalStream>>,
+    stats: Vec<(String, bool)>,
+}
+
+#[pymethods]
+impl PyZonalStream {
+    /// Adds window number `window` (of `ZonalReducer.windows`): a 2-D array of shape
+    /// `(height, width)`, of any numeric dtype and strides. Windows must come in order.
+    fn add(&self, py: Python<'_>, window: usize, array: &Bound<'_, numpy::PyUntypedArray>) -> PyResult<()> {
+        let mut guard = self.stream.lock().map_err(|_| crate::invalid("the stream is poisoned"))?;
+        let stream = guard.as_mut().ok_or_else(|| crate::invalid("the stream is finished"))?;
+        if let Some(&(_, _, w, h)) = self.windows.get(window) {
+            let shape = array.shape();
+            if shape != [h, w] {
+                let got = shape.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+                return Err(crate::invalid(format!("window {window}: expected (h, w) = ({h}, {w}), got an array of shape ({got})")));
+            }
+        }
+        let data = crate::raster::from_numpy(array)?;
+        py.detach_result(|| stream.add(window, &data)).py()
+    }
+
+    /// The statistics, as `{name: array}` with one value per zone feature, in layer order: int64
+    /// for `count` (unless fractional) and `variety`, float64 (NaN for null) for the others.
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        use numpy::IntoPyArray;
+        use terrio::FieldValue;
+        let stream = self.stream.lock().map_err(|_| crate::invalid("the stream is poisoned"))?.take();
+        let stream = stream.ok_or_else(|| crate::invalid("the stream is finished"))?;
+        let columns = py.detach_result(|| stream.finish()).py()?;
+        let out = pyo3::types::PyDict::new(py);
+        for ((name, integer), column) in self.stats.iter().zip(columns) {
+            if *integer {
+                let values = column.iter().map(|v| if let FieldValue::Integer(i) = v { *i } else { 0 }).collect::<Vec<_>>();
+                out.set_item(name, values.into_pyarray(py))?;
+            } else {
+                let values = column
+                    .iter()
+                    .map(|v| match v {
+                        FieldValue::Float(x) => *x,
+                        FieldValue::Integer(i) => *i as f64,
+                        _ => f64::NAN,
+                    })
+                    .collect::<Vec<_>>();
+                out.set_item(name, values.into_pyarray(py))?;
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// A zonal raster: a path, opened only while it is read (see `ZonalRaster::Path`), or a `Raster`.

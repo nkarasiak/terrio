@@ -594,6 +594,26 @@ can be supplied as `weights=...`, with `weight_band=1`, then select `weighted_me
 `weighted_sum` or `weighted_stddev` in `stats`. See the
 [formulas and limits](cli.md#fractional-coverage-and-weighting-rasters).
 
+### Computing statistics from arrays you produce
+
+`ZonalReducer` gives the results of `zonal_stats` for arrays you compute yourself, a strip at a
+time, such as a band index over a scene, without writing them to a raster first. Zones are
+computed once for the grid; `windows()` lists the `(x, y, width, height)` strips that hold zone
+pixels, and `stream()` reduces one band fed those strips in order (call both with the same
+`strip_rows`):
+
+```python
+reducer = terrio.ZonalReducer(fields, width, height, transform, "EPSG:32631", stats=["mean", "median"])
+stream = reducer.stream(nodata=0)
+for i, (x, y, w, h) in enumerate(reducer.windows()):
+    red, nir = read_strip(x, y, w, h)  # your arrays, shape (h, w)
+    stream.add(i, (nir - red) / (nir + red))
+ndvi = stream.finish()  # {"mean": array, "median": array}, one value per field
+```
+
+`finish()` returns one array per statistic: `count` and `variety` are int64, the others float64
+with NaN where a zone has no valid pixels. Weighted statistics need `zonal_stats`.
+
 ## Native multidimensional arrays
 
 See [Native multidimensional arrays](multidim.md) for scientific groups, named dimensions,

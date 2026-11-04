@@ -84,6 +84,10 @@
   `_FillValue`, they take netCDF's default `Int64` nodata (`-9223372036854775806`). An
   inverted `valid_range` (or `valid_min` above `valid_max`) is ignored, as GDAL ignores it, where
   it made every pixel nodata (#553).
+- Python: `terrio.ZonalReducer` computes zonal statistics from arrays you produce strip by strip
+  (after your own per-pixel transforms, say), with the results of `zonal_stats` for a raster
+  holding the same values: `windows()` lists the strips to supply, `stream()` reduces one band
+  and `finish()` returns one array per statistic.
 - Zonal statistics at datacube scale: zones are computed once per distinct raster grid and
   shared by every raster on it; rasters are read lazily (local, remote, STAC, Zarr) in strips of
   block rows, only where zones lie, and in parallel, and the memory a reduced raster freed is

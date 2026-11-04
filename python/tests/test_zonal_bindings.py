@@ -343,3 +343,139 @@ def test_zonal_labelled_inputs_missing_values_and_several_bands(tmp_path):
     frame["time"] = frame["time"].dt.tz_localize("UTC")
     got = props(frame)
     assert (got["2024_07_01_B04_mean"], got["2024_07_11T06_30_00Z_b1_mean"]) == (2.0, 2.0)
+
+
+REDUCER_STATS = ["count", "mean", "stddev", "median", "quantile_25", "variety"]
+REDUCER_TRANSFORM = (0, 0.01, 0, 2, 0, -0.01)
+
+
+def reducer_zones():
+    """The zone of `inputs()`, a triangle over it and another partly off the grid, an empty
+    geometry, and a zone outside the grid."""
+    square, _ = inputs()
+    features = square.to_geojson()["features"]
+    outside = [[[10, 0], [11, 0], [11, 1], [10, 1], [10, 0]]]
+    triangle = [[[0.2, 0.2], [2.8, 0.4], [1.1, 1.9], [0.2, 0.2]]]
+    partial = [[[2.5, 0.5], [3.5, 0.5], [3.5, 1.5], [2.5, 1.5], [2.5, 0.5]]]
+    for coords in (triangle, outside, partial):
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"zone": "extra"},
+                "geometry": {"type": "Polygon", "coordinates": coords},
+            }
+        )
+    return terrio.Layer.from_geojson(
+        {"type": "FeatureCollection", "features": features}, crs="EPSG:4326"
+    )
+
+
+def reducer_array(dtype):
+    rng = np.random.default_rng(7)
+    arr = rng.integers(0, 40, (200, 300)).astype(dtype)
+    arr[rng.random(arr.shape) < 0.1] = np.nan if np.dtype(dtype).kind == "f" else 0
+    return arr
+
+
+def reduce_windows(reducer, arr, strip_rows=None, nodata=None, prepare=lambda a: a):
+    stream = reducer.stream(strip_rows, nodata)
+    for i, (x, y, w, h) in enumerate(reducer.windows(strip_rows)):
+        stream.add(i, prepare(arr[y : y + h, x : x + w]))
+    return stream.finish()
+
+
+@pytest.mark.parametrize("all_touched", [False, True])
+@pytest.mark.parametrize("dtype", ["uint16", "int16", "float32", "float64"])
+def test_zonal_reducer_matches_zonal_stats(dtype, all_touched):
+    arr = reducer_array(dtype)
+    nodata = np.nan if np.dtype(dtype).kind == "f" else 0
+    raster = terrio.Raster.from_array(arr, REDUCER_TRANSFORM, crs="EPSG:4326", nodata=nodata)
+    zones = reducer_zones()
+    expected = terrio.zonal_stats(zones, raster, stats=REDUCER_STATS, all_touched=all_touched)
+    reducer = terrio.ZonalReducer(
+        zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=REDUCER_STATS, all_touched=all_touched
+    )
+    assert reducer.feature_count == 5
+    assert reducer.stats == REDUCER_STATS
+    # Several strips, so that the windows are fed one after another.
+    got = reduce_windows(reducer, arr, strip_rows=37, nodata=nodata)
+    assert list(got) == REDUCER_STATS
+    assert got["count"].dtype == got["variety"].dtype == np.int64
+    assert got["mean"].dtype == np.float64
+    for stat in REDUCER_STATS:
+        column = expected.to_geojson()["features"]
+        want = [f["properties"][f"raster1_b1_{stat}"] for f in column]
+        want = np.array([np.nan if v is None else v for v in want], dtype=got[stat].dtype)
+        np.testing.assert_array_equal(got[stat], want, err_msg=stat)
+    assert got["count"].max() > 0
+    assert got["count"][3] == 0 and np.isnan(got["mean"][3])
+
+
+def test_zonal_reducer_defaults_and_fractional_count():
+    arr = reducer_array("float64")
+    zones = reducer_zones()
+    reducer = terrio.ZonalReducer(zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326")
+    assert reducer.stats == ["count", "min", "max", "mean", "sum", "stddev"]
+    fractional = terrio.ZonalReducer(
+        zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["count"], fractional=True
+    )
+    assert reduce_windows(fractional, arr)["count"].dtype == np.float64
+
+
+@pytest.mark.parametrize(
+    "prepare",
+    [
+        lambda a: a[::-1][::-1],
+        lambda a: np.asfortranarray(a),
+        lambda a: np.repeat(a, 2, axis=1)[:, ::2],
+    ],
+    ids=["reversed_twice", "fortran", "strided_columns"],
+)
+def test_zonal_reducer_strided_arrays(prepare):
+    arr = reducer_array("float32")
+    reducer = terrio.ZonalReducer(
+        reducer_zones(), 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=REDUCER_STATS
+    )
+    want = reduce_windows(reducer, arr, nodata=np.nan)
+    got = reduce_windows(reducer, arr, nodata=np.nan, prepare=prepare)
+    for stat in REDUCER_STATS:
+        np.testing.assert_array_equal(got[stat], want[stat])
+
+
+def test_zonal_reducer_errors():
+    zones = reducer_zones()
+    reducer = terrio.ZonalReducer(
+        zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["count"]
+    )
+    (x, y, w, h), (_, _, w1, h1), *_ = reducer.windows(37)
+    stream = reducer.stream(37)
+    with pytest.raises(terrio.InvalidArgumentError, match=r"expected \(h, w\)") as e:
+        stream.add(0, np.zeros((h, w + 1)))
+    assert f"({h}, {w})" in str(e.value) and f"({h}, {w + 1})" in str(e.value)
+    with pytest.raises(terrio.InvalidArgumentError, match=r"expected \(h, w\)"):
+        stream.add(0, np.zeros(h * w))
+    with pytest.raises(terrio.InvalidArgumentError, match="expected window 0"):
+        stream.add(1, np.zeros((h1, w1)))
+    stream.add(0, np.zeros((h, w)))
+    with pytest.raises(terrio.InvalidArgumentError, match="windows"):
+        reducer.stream(37).finish()
+    with pytest.raises(terrio.InvalidArgumentError, match="weighted statistics need zonal_stats"):
+        terrio.ZonalReducer(
+            zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["weighted_mean"]
+        )
+    with pytest.raises(terrio.InvalidArgumentError, match="unknown zonal statistic"):
+        terrio.ZonalReducer(zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["nope"])
+
+
+def test_zonal_reducer_stream_is_finished_once():
+    reducer = terrio.ZonalReducer(
+        reducer_zones(), 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["count"]
+    )
+    stream = reducer.stream()
+    for i, (_, _, w, h) in enumerate(reducer.windows()):
+        stream.add(i, np.ones((h, w)))
+    stream.finish()
+    with pytest.raises(terrio.InvalidArgumentError, match="the stream is finished"):
+        stream.finish()
+    with pytest.raises(terrio.InvalidArgumentError, match="the stream is finished"):
+        stream.add(0, np.ones((1, 1)))

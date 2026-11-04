@@ -100,6 +100,8 @@ __all__ = [
     "make_valid",
     "singlepart",
     "zonal_stats",
+    "ZonalReducer",
+    "ZonalStream",
     "rgb_to_palette",
     "palette_to_rgb",
     "attach_palette",
@@ -2514,6 +2516,54 @@ def zonal_stats(
     Field-name collisions receive _2, _3, etc. suffixes.
     """
     ...
+
+@final
+class ZonalReducer:
+    """Zonal statistics of arrays you produce strip by strip, equal to ``zonal_stats`` over a
+    raster holding the same values.
+
+    The zones are computed once for the grid; each ``stream()`` then reduces one band, fed the
+    ``windows()`` in order. ``stats`` are those of ``zonal_stats`` except the weighted ones.
+    """
+
+    def __new__(
+        cls,
+        zones: Any,
+        width: int,
+        height: int,
+        transform: Sequence[float],
+        crs: str | None = None,
+        *,
+        stats: Sequence[str] | None = None,
+        all_touched: bool = False,
+        fractional: bool = False,
+        layer: str | None = None,
+    ) -> ZonalReducer: ...
+    def windows(self, strip_rows: int | None = None) -> list[_Window]:
+        """The windows to supply, in order, as ``(x, y, width, height)``: strips of ``strip_rows``
+        rows holding zone pixels, cropped to the columns of those pixels."""
+        ...
+    @property
+    def feature_count(self) -> int: ...
+    @property
+    def stats(self) -> list[str]: ...
+    def stream(
+        self, strip_rows: int | None = None, nodata: float | None = None
+    ) -> ZonalStream:
+        """A reduction of one band over ``windows(strip_rows)``; pixels equal to ``nodata``, or
+        not finite, are left out."""
+        ...
+
+@final
+class ZonalStream:
+    def add(self, window: int, array: NDArray[Any]) -> None:
+        """Add window number ``window``: a 2-D array of shape ``(height, width)``, of any
+        numeric dtype and strides. Windows must come in order."""
+        ...
+    def finish(self) -> dict[str, NDArray[Any]]:
+        """One array per statistic, a value per zone feature: int64 for ``count`` (unless
+        fractional) and ``variety``, float64 (NaN for null) for the others."""
+        ...
 
 def singlepart(src: Any, *, layer: str | None = None) -> Layer:
     """Split multipart/collection geometry recursively; output IDs start at one."""
