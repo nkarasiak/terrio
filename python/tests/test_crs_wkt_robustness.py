@@ -11,6 +11,7 @@ same malformed WKT through a GeoJSON `crs` member, a PAM `<SRS>` and a GeoTIFF's
 """
 
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -59,6 +60,9 @@ def _run(code, *args):
             text=True,
             timeout=TIMEOUT,
             preexec_fn=_limit,
+            # Under RLIMIT_AS, thread pools must stay small: each thread's malloc arena reserves
+            # 64 MiB of address space, so one per core fills 2 GiB on a 32-core machine.
+            env=dict(os.environ, OPENBLAS_NUM_THREADS="1", MALLOC_ARENA_MAX="2", RAYON_NUM_THREADS="4"),
         )
     except subprocess.TimeoutExpired:
         pytest.fail(f"no answer within {TIMEOUT} s")
