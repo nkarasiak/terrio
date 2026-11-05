@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- GeoTIFF and COG writers compress Deflate chunks with a pure-Rust port of libdeflate 1.26's
+  level 6 compressor, the library and level GDAL uses for them, in place of zlib-rs. The chunks
+  are libdeflate's, byte for byte: every 512 x 512 tile of six rasters (float32 DEM, int16
+  classes, two Sentinel-2 uint16 bands, float32 reflectance and NDVI), 1,616 tiles, compared
+  equal. On one core, the DEM's 165 tiles compress in 1.36 s, where zlib-rs took 2.6 s and
+  libdeflate 1.65 s (a Sentinel-2 band: 1.98 / 3.6 / 2.24 s), to 136.46 MB, as libdeflate's,
+  where zlib-rs's took 136.09 MB. Writing the 5610 x 7533 DEM as a Deflate COG takes 2.75 s of
+  CPU, down from 3.7 s (rioxarray: 2.95 s); its pixels and overviews equal GDAL's, and its size
+  is within 0.005% of GDAL's. The port is MIT-licensed and credited in `NOTICE` and
+  `docs/acknowledgements.md`.
+- Raster writers write over an existing file in place, where they truncated it first and waited
+  for the kernel to write its old pages back: GeoTIFF and COG (whole, streamed and built from
+  overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, HGT, WebP, GSBG, GeoPackage, netCDF, JPEG 2000,
+  XYZ, PNG, JPEG and RST, with their `.hdr`, ENVI and ERS headers, `.sgrd`, `.rdc` and `.wld`
+  files (`.prj` and `.aux.xml` sidecars, GRIB2, MBTiles, PMTiles and Zarr are still truncated).
+  The file stays the same file: a symlink is written through, it keeps its permissions, and its
+  hard links and readers holding it open see the new content; a shorter output drops the old
+  tail. A write that fails now leaves the file empty rather than holding part of the new one.
+  Rewriting a 170 MB GeoTIFF eight times takes a steady 0.22 s each, where truncating took 0.07
+  to 0.8 s with stalls; a 170 MB Float32 raster written eight times over the same path takes
+  0.10 to 0.11 s per write as EHdr (was 0.15 to 0.16 s), 0.11 to 0.12 s as ENVI (0.15 to
+  0.76 s), 0.10 to 0.11 s as SAGA (0.15 to 0.39 s) and 0.25 s as RST (0.30 to 0.67 s). A slope
+  file-to-file benchmark takes 0.53 s, where it took 1.01 s (`gdaldem`: 0.90 s).
+- Python operations given a `terrio.Raster` held in memory share it instead of copying it; only
+  a `mask=` raster of `footprint` and `polygonize` is still copied. An operation does not change
+  a raster in memory, so the sharing is not visible. On a large DEM in memory, one thread, with
+  nodata / without: TPI takes 0.068 / 0.034 s (was 0.086 / 0.052 s), slope 0.192 / 0.153 s
+  (0.212 / 0.172 s), hillshade 0.128 / 0.092 s (0.146 / 0.111 s), with the same outputs.
+- On Linux, the Python extension's allocator advises buffers of 4 MiB or more to use transparent
+  huge pages (`madvise(MADV_HUGEPAGE)`), as NumPy does for its arrays; under THP's `madvise`
+  mode a raster buffer otherwise takes a page fault every 4 KiB on first write. Other platforms,
+  the Rust crate, the CLI and WebAssembly are unchanged. For a 170 MB float32 raster, one
+  thread: `Raster.from_array` 0.052 -> 0.020 s, `read()` 0.050 -> 0.021 s, `terrio.dem` slope
+  0.27 -> 0.20 s. The allocator ignores the null pointer openjp2 0.6 deallocates when decoding
+  JPEG 2000, as `free` does.
+- `terrio.rio.features.rasterize` burns shapes that all take one value (`geometry_mask`,
+  `default_value`, and the touched pixels of `MergeAlg.add`) as a byte coverage, not as an Int64
+  raster of feature numbers gathered back into values: the same pixels with an eighth of the
+  memory. On the 5610 x 7533 DEM, one thread, `terrio.xarray` masking with 2,000 polygons takes
+  0.32 s (was 0.53 s) and cropping to a 2,000-vertex polygon 0.29 s (was 0.59 s).
+- `clip` in `terrio.xarray` (DataArrays and Datasets) and `terrio.rio.features.geometry_mask`
+  take a `terrio.Layer`, burnt without a round trip through GeoJSON on north-up grids (other
+  grids still go through GeoJSON), with the pixels of the GeoJSON path. `clip` reprojects the
+  Layer from its own CRS, or from `crs=` when it has none; a `crs=` differing from the Layer's
+  own CRS raises `ValueError`. Masking the 5610 x 7533 DEM with 2,000 polygons from a
+  GeoDataFrame, one thread: 0.32 -> 0.14 s.
+- `terrio.rio.windows.get_data_window` reduces each axis instead of listing every valid pixel,
+  with the same windows: `.terrio.clip` of the 5610 x 7533 DEM to one polygon takes 0.13 s, where
+  it took 0.247 s (rioxarray: 0.21 s).
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
