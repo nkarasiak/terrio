@@ -121,8 +121,9 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
     let pixels = |zone: &Zone| zone.spans.iter().map(|s| i64::from(s.len)).sum::<i64>();
     // The change in open pixels at each strip where it changes, in order.
     let changes: Vec<i64> = match zone_strips(index, strip_rows) {
-        // A slot per strip, when there are fewer strips than two per zone.
-        Some((first, last, _)) if last - first < 2 * index.zones.len() => {
+        // A slot per strip (8 bytes), when that takes less room than two pairs per zone and their
+        // sums (up to 48 bytes a zone).
+        Some((first, last, _)) if last - first < 6 * index.zones.len() => {
             let mut change = vec![0i64; last - first + 2];
             for zone in &index.zones {
                 let pixels = pixels(zone);
