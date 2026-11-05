@@ -717,15 +717,18 @@ fn roughness<T: Px>(w: &[T; 9]) -> f32 {
     hi.sub(lo).f32()
 }
 
-/// A 3×3 algorithm.
-type Alg<'a, T> = &'a (dyn Fn(&[T; 9]) -> f32 + Sync);
-
-/// A 3×3 algorithm, with the optional vectorized version GDAL uses on rows free of nodata.
-struct Kernel<'a, T> {
-    f: Alg<'a, T>,
+/// A 3×3 algorithm `f`, with the optional vectorized version GDAL uses on rows free of nodata.
+/// Generic rather than `dyn Fn`, so the algorithm is inlined into `process`'s loop.
+struct Kernel<F, M> {
+    f: F,
     /// Computes columns `1, 1 + 4, ...` in groups of four while `j < width - 4`, returning the
     /// first column it did not compute.
-    multi: Option<Alg<'a, T>>,
+    multi: Option<M>,
+}
+
+/// A kernel without a vectorized version.
+fn single<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, fn(&[T; 9]) -> f32> {
+    Kernel { f, multi: None }
 }
 
 /// The rows of a band a 3×3 algorithm runs over: `src` holds rows `src_rows` of a band of
@@ -741,7 +744,11 @@ struct Rows<'a, T> {
 
 /// `GDALGeneric3x3Processing()`: runs a 3×3 algorithm over rows of a band, returning the rows
 /// computed. The values do not depend on how the band is split in rows.
-fn process<T: Px>(rows: Rows<T>, nodata: Option<T>, dst_nodata: f32, edges: bool, k: &Kernel<T>) -> Vec<f32> {
+fn process<T: Px, F, M>(rows: Rows<T>, nodata: Option<T>, dst_nodata: f32, edges: bool, k: &Kernel<F, M>) -> Vec<f32>
+where
+    F: Fn(&[T; 9]) -> f32 + Sync,
+    M: Fn(&[T; 9]) -> f32 + Sync,
+{
     let Rows { src, width: w, height: h, src_rows, out_rows } = rows;
     let (s0, o0, o1) = (src_rows.start, out_rows.start, out_rows.end);
     let mut out = vec![dst_nodata; w * (o1 - o0)];
@@ -803,7 +810,7 @@ fn process<T: Px>(rows: Rows<T>, nodata: Option<T>, dst_nodata: f32, edges: bool
         }
         let win_at = |j: usize| [l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]];
         let mut j = 1;
-        if let Some(multi) = k.multi
+        if let Some(multi) = &k.multi
             && !check
         {
             while j + 4 < w {
@@ -1073,38 +1080,48 @@ impl Terrain {
                 let same_res = gt[1] == -gt[5] && xscale == yscale;
                 let (ew, ns) = (gt[1] * xscale, gt[5] * yscale);
                 let azimuth = !o.trigonometric;
-                let f: Box<dyn Fn(&[$t; 9]) -> f32 + Sync> = match product {
-                    DemProduct::Hillshade if use_float32 => Box::new(move |w| float32_terrain.shade(w, false)),
+                // GDAL's vectorized standard hillshade applies (on x86_64).
+                let simd = cfg!(target_arch = "x86_64") && o.shading == Shading::Standard && o.gradient == GradientAlg::Horn && same_res;
+                let rows = Rows { src: $src, width: w, height: h, src_rows, out_rows };
+                let (nd, edges) = ($nd, o.compute_edges);
+                // One `process` per algorithm, each with its closure inlined.
+                match product {
+                    DemProduct::Hillshade if use_float32 => {
+                        let f = move |w: &[$t; 9]| float32_terrain.shade(w, false);
+                        let multi = move |w: &[$t; 9]| float32_terrain.shade(w, true);
+                        process(rows, nd, dst_nd, edges, &Kernel { f, multi: simd.then_some(multi) })
+                    }
                     DemProduct::Hillshade => match o.shading {
-                        Shading::MultiDirectional => Box::new(move |w| md.shade(w)),
-                        Shading::Combined => Box::new(move |w| hs.combined(w)),
-                        Shading::Igor => Box::new(move |w| hs.igor(w)),
-                        Shading::Standard if o.gradient == GradientAlg::Horn && same_res => Box::new(move |w| hs.same_res(w)),
-                        Shading::Standard => Box::new(move |w| hs.standard(w)),
+                        Shading::MultiDirectional => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| md.shade(w))),
+                        Shading::Combined => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| hs.combined(w))),
+                        Shading::Igor => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| hs.igor(w))),
+                        Shading::Standard if o.gradient == GradientAlg::Horn && same_res => {
+                            let f = move |w: &[$t; 9]| hs.same_res(w);
+                            #[cfg(target_arch = "x86_64")]
+                            let multi = Some(move |w: &[$t; 9]| hs.same_res_simd(w));
+                            #[cfg(not(target_arch = "x86_64"))]
+                            let multi = None::<fn(&[$t; 9]) -> f32>;
+                            process(rows, nd, dst_nd, edges, &Kernel { f, multi })
+                        }
+                        Shading::Standard => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| hs.standard(w))),
                     },
                     DemProduct::Slope => {
                         let (alg, percent) = (o.gradient, o.slope_percent);
-                        Box::new(move |w| if use_float32 { slope_f32(w, alg, ew, ns, percent) } else { slope(w, alg, ew, ns, percent) })
+                        if use_float32 {
+                            process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| slope_f32(w, alg, ew, ns, percent)))
+                        } else {
+                            process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| slope(w, alg, ew, ns, percent)))
+                        }
                     }
                     DemProduct::Aspect => {
                         let alg = o.gradient;
-                        Box::new(move |w| aspect(w, alg, azimuth, dst_nd))
+                        process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| aspect(w, alg, azimuth, dst_nd)))
                     }
-                    DemProduct::Tri if o.tri == TriAlg::Wilson => Box::new(tri_wilson::<$t>),
-                    DemProduct::Tri => Box::new(tri_riley::<$t>),
-                    DemProduct::Tpi => Box::new(tpi::<$t>),
-                    DemProduct::Roughness => Box::new(roughness::<$t>),
-                };
-                #[cfg(target_arch = "x86_64")]
-                let simd = move |w: &[$t; 9]| if use_float32 { float32_terrain.shade(w, true) } else { hs.same_res_simd(w) };
-                #[cfg(target_arch = "x86_64")]
-                let multi: Option<&(dyn Fn(&[$t; 9]) -> f32 + Sync)> =
-                    (product == DemProduct::Hillshade && o.shading == Shading::Standard && o.gradient == GradientAlg::Horn && same_res)
-                        .then_some(&simd);
-                #[cfg(not(target_arch = "x86_64"))]
-                let multi: Option<&(dyn Fn(&[$t; 9]) -> f32 + Sync)> = None;
-                let rows = Rows { src: $src, width: w, height: h, src_rows, out_rows };
-                process::<$t>(rows, $nd, dst_nd, o.compute_edges, &Kernel { f: &*f, multi })
+                    DemProduct::Tri if o.tri == TriAlg::Wilson => process(rows, nd, dst_nd, edges, &single(tri_wilson::<$t>)),
+                    DemProduct::Tri => process(rows, nd, dst_nd, edges, &single(tri_riley::<$t>)),
+                    DemProduct::Tpi => process(rows, nd, dst_nd, edges, &single(tpi::<$t>)),
+                    DemProduct::Roughness => process(rows, nd, dst_nd, edges, &single(roughness::<$t>)),
+                }
             }};
         }
         let values = match band {
