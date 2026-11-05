@@ -829,7 +829,7 @@ const LANES: usize = 16;
 #[inline(always)]
 fn f32_near(d: f64) -> (f32, bool) {
     let low = d.to_bits() & ((1 << 29) - 1);
-    (d as f32, (low.wrapping_sub((1 << 28) - 64) < 128) | !(d.abs() >= 1e-30 || d == 0.0))
+    (d as f32, (low.wrapping_sub((1 << 28) - 64) <= 128) | !(d.abs() >= 1e-30 || d == 0.0))
 }
 
 /// `v as f32`, and whether `v`, computed within `1e-10` of libm's value, must be recomputed: when
