@@ -210,6 +210,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         offset: 0,
         bottom_up: false,
     };
+    common::clear_header(&header)?;
     common::write_replacing(&data_path, common::encode(r, &layout))?;
 
     let name = data_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();

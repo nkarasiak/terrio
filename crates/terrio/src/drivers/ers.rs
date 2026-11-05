@@ -160,6 +160,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         bottom_up: false,
     };
     let header = path.with_extension("ers");
+    common::clear_header(&header)?;
     common::write_replacing(data_path(&header), common::encode(r, &layout))?;
     let crs = super::common::spatial_ref(&r.crs);
     let (projection, datum) = match crs.epsg {

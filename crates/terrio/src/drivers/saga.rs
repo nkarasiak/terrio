@@ -94,6 +94,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         offset: 0,
         bottom_up: true,
     };
+    common::clear_header(path.with_extension("sgrd"))?;
     common::write_replacing(&data, common::encode(r, &layout))?;
     let name = data.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
     let nd = nodata.map(|v| common::format_value(v, r.data_type)).unwrap_or_else(|| "-99999".into());

@@ -864,9 +864,10 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// moments before; the file (its permissions, links and open handles) stays the same. A path that
 /// is not a regular file (`/dev/null`, a FIFO) is written as it was before, with no truncation.
 ///
-/// The file's first [`HEAD`] bytes, where every format puts its signature (TIFF, BigTIFF, PNG,
+/// The file's first [`HEAD`] bytes, where formats with a signature put it (TIFF, BigTIFF, PNG,
 /// SQLite), are zeroed at once and written last, by [`Rewrite::finish`]: a write interrupted before
-/// (the process killed, the disk full) leaves no file that opens as a raster of old and new bytes.
+/// (the process killed, the disk full) leaves no such file that opens as a raster of old and new
+/// bytes. Headerless data files rely on their header sidecar instead ([`clear_header`]).
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
@@ -974,6 +975,18 @@ impl std::io::Seek for Rewrite {
     }
 }
 
+/// Empties the header sidecar at `path`, if there is one, before its headerless data file is
+/// written over: a write interrupted in the data then leaves no header that would open the file as
+/// a raster of old and new bytes. The header is written again after the data.
+pub(crate) fn clear_header(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) if f.metadata()?.is_file() => f.set_len(0),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// [`std::fs::write`] through [`create_replacing`]: `bytes` written over the file at `path`.
 pub(crate) fn write_replacing(path: impl AsRef<std::path::Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write;
@@ -1007,6 +1020,17 @@ mod tests {
         let mut want = b"II*\0\x09\0\0\0".to_vec();
         want.extend([1u8; 24]);
         assert_eq!(std::fs::read(&path).unwrap(), want);
+    }
+
+    /// A header sidecar is emptied before its data file is written over; a missing one is fine.
+    #[test]
+    fn clearing_a_header_empties_it_and_skips_a_missing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let hdr = dir.path().join("a.hdr");
+        std::fs::write(&hdr, "NROWS 2\nNCOLS 2\n").unwrap();
+        clear_header(&hdr).unwrap();
+        assert_eq!(std::fs::metadata(&hdr).unwrap().len(), 0);
+        clear_header(dir.path().join("missing.hdr")).unwrap();
     }
 
     /// A device is written over as before, with no truncation to fail on.
