@@ -972,8 +972,8 @@ fn roughness<T: Px>(w: &[T; 9]) -> f32 {
 struct Kernel<F, M, R> {
     f: F,
     /// The value of one window as GDAL's SSE path computes it, which `process` calls for columns
-    /// `1, 1 + 4, ...` in groups of four on rows free of nodata (now only the GDAL 3.13 Float32
-    /// hillshade on x86-64).
+    /// `1, 1 + 4, ...` in groups of four on rows free of nodata (now only the GDAL 3.13 kernel's
+    /// Horn hillshade of square pixels on x86-64).
     multi: Option<M>,
     /// Computes columns `1..width - 1` of a row from the rows above, at and below it, and whether
     /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give;

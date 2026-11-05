@@ -3,10 +3,12 @@
 ## Unreleased
 
 - `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes its 3×3 products a row at a
-  time, 16 windows at once (on x86-64, the default hillshade 4 at a time on rows without nodata,
-  with GDAL's SSE reciprocal square root, as before), with AVX2 where `is_x86_feature_detected!` finds it at run time and
+  time, 16 windows at once (the default hillshade's rows without nodata excepted: 4 windows at a
+  time with GDAL's SSE reciprocal square root on x86-64, one at a time elsewhere, as before),
+  with AVX2 where `is_x86_feature_detected!` finds it at run time and
   the same code without it on other CPUs and in WebAssembly. Rows holding nodata no longer fall
-  back to one pixel at a time, except in the GDAL 3.13 Float32 hillshade on x86-64: only the
+  back to one pixel at a time, except in the GDAL 3.13 kernel's Horn hillshade of square pixels on
+  x86-64 (its Float32 arithmetic): only the
   windows around each row's nodata are recomputed with the per-pixel code. Slope, aspect and the combined and Igor hillshades take their arctangents from
   fdlibm (credited in `NOTICE`, `LICENSES/SunPro.txt` and the acknowledgements), and recompute
   with the platform's functions the few pixels whose result could round differently, so the
