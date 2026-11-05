@@ -344,7 +344,7 @@ impl JsZonalReducer {
     }
 
     /// The windows to supply, in order, as `[x, y, width, height]`: strips of `stripRows` rows
-    /// holding zone pixels, cropped to the columns of those pixels.
+    /// holding zone pixels, cropped to the rows and columns of those pixels.
     pub fn windows(&self) -> js_sys::Array {
         self.inner
             .windows()

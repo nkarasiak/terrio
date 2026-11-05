@@ -314,7 +314,8 @@ impl PyZonalReducer {
     }
 
     /// The windows to supply, in order, as `(x, y, width, height)`: strips of `strip_rows` rows
-    /// holding zone pixels, cropped to the columns of those pixels. Slice `array[y:y+h, x:x+w]`.
+    /// holding zone pixels, cropped to the rows and columns of those pixels. Slice
+    /// `array[y:y+h, x:x+w]`.
     fn windows(&self) -> Vec<(usize, usize, usize, usize)> {
         self.inner.windows().iter().map(|w| (w.x, w.y, w.width, w.height)).collect()
     }

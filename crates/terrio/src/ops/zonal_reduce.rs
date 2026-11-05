@@ -2,7 +2,7 @@
 //! row-major order whatever the strip height, so results do not depend on it.
 
 use super::Statistic;
-use super::index::ZoneIndex;
+use super::index::{Zone, ZoneIndex};
 use crate::raster::RasterData;
 use crate::{DataType, Error, FieldValue, LazyRaster, Result, Window, WindowOptions};
 
@@ -60,26 +60,51 @@ impl<'a> Plan<'a> {
     }
 }
 
+/// The strips `(first, last)` that the zones of `index` cross in strips of `strip_rows` rows, and
+/// how many (zone, strip) pairs they make; `None` without zones. A slot per strip of that range
+/// (as `zonal_stats`' strips of many rows usually take) needs no sort; zones far apart for their
+/// strip height (a caller's strips of one row, say) take less room as a list of pairs.
+fn zone_strips(index: &ZoneIndex, strip_rows: usize) -> Option<(usize, usize, usize)> {
+    let strips = |z: &Zone| (z.row_start / strip_rows, (z.row_end - 1) / strip_rows);
+    let first = strips(index.zones.first()?).0;
+    let last = index.zones.iter().map(|z| strips(z).1).max()?;
+    let crossed = index.zones.iter().map(|z| strips(z).1 - strips(z).0 + 1).fold(0, usize::saturating_add);
+    Some((first, last, crossed))
+}
+
 /// The windows read for `index` in strips of `strip_rows` rows from row 0: each strip holding
 /// zone pixels, over the rows and columns of the pixels in it. Strips without zone pixels, such
 /// as those between the parts of a multipolygon, are left out.
 pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window> {
-    // (strip, first row, end row, first column, end column) of the zone pixels in a strip, an
-    // entry per zone and strip it crosses, merged by strip: memory follows the zones, not the
-    // rows of the grid between them.
+    // (strip, first row, end row, first column, end column) of the zone pixels in a strip.
     let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
-    for zone in &index.zones {
-        let zone_parts = parts.len();
-        for span in &zone.spans {
-            let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
-            match parts[zone_parts..].last_mut() {
-                // A zone's spans are in row-major order: its strips come one after another.
-                Some(p) if p.0 == row / strip_rows => *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end)),
-                _ => parts.push((row / strip_rows, row, row + 1, col, end)),
+    match zone_strips(index, strip_rows) {
+        // A slot per strip, when there are fewer strips than (zone, strip) pairs.
+        Some((first, last, crossed)) if last - first < crossed => {
+            let mut slots: Vec<Option<(usize, usize, usize, usize, usize)>> = vec![None; last - first + 1];
+            for span in index.zones.iter().flat_map(|z| &z.spans) {
+                let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
+                let p = slots[row / strip_rows - first].get_or_insert((row / strip_rows, row, row + 1, col, end));
+                *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end));
             }
+            parts.extend(slots.into_iter().flatten());
+        }
+        // Else a part per (zone, strip) pair, merged by strip.
+        _ => {
+            for zone in &index.zones {
+                let zone_parts = parts.len();
+                for span in &zone.spans {
+                    let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
+                    match parts[zone_parts..].last_mut() {
+                        // A zone's spans are in row-major order: its strips come one after another.
+                        Some(p) if p.0 == row / strip_rows => *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end)),
+                        _ => parts.push((row / strip_rows, row, row + 1, col, end)),
+                    }
+                }
+            }
+            parts.sort_unstable_by_key(|p| p.0);
         }
     }
-    parts.sort_unstable_by_key(|p| p.0);
     parts
         .chunk_by(|a, b| a.0 == b.0)
         .map(|strip| {
@@ -95,21 +120,34 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
 /// first row and finishes it after the strip of its last.
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
     let strip_rows = strip_rows.max(1);
-    // (strip, change in open pixels): two per zone, so memory follows the zones, not the grid.
-    let mut changes: Vec<(usize, i64)> = index
-        .zones
-        .iter()
-        .flat_map(|zone| {
-            let pixels: i64 = zone.spans.iter().map(|s| i64::from(s.len)).sum();
-            [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
-        })
-        .collect();
-    changes.sort_unstable_by_key(|c| c.0);
+    let pixels = |zone: &Zone| zone.spans.iter().map(|s| i64::from(s.len)).sum::<i64>();
+    // The change in open pixels at each strip where it changes, in order.
+    let changes: Vec<i64> = match zone_strips(index, strip_rows) {
+        // A slot per strip, when there are fewer strips than two per zone.
+        Some((first, last, _)) if last - first < 2 * index.zones.len() => {
+            let mut change = vec![0i64; last - first + 2];
+            for zone in &index.zones {
+                change[zone.row_start / strip_rows - first] += pixels(zone);
+                change[(zone.row_end - 1) / strip_rows + 1 - first] -= pixels(zone);
+            }
+            change
+        }
+        // Else two (strip, change) pairs per zone, summed by strip.
+        _ => {
+            let mut pairs: Vec<(usize, i64)> = index
+                .zones
+                .iter()
+                .flat_map(|zone| [(zone.row_start / strip_rows, pixels(zone)), ((zone.row_end - 1) / strip_rows + 1, -pixels(zone))])
+                .collect();
+            pairs.sort_unstable_by_key(|c| c.0);
+            pairs.chunk_by(|a, b| a.0 == b.0).map(|strip| strip.iter().map(|c| c.1).sum()).collect()
+        }
+    };
     let mut open = 0i64;
     changes
-        .chunk_by(|a, b| a.0 == b.0)
-        .map(|strip| {
-            open += strip.iter().map(|c| c.1).sum::<i64>();
+        .iter()
+        .map(|c| {
+            open += c;
             open
         })
         .max()
@@ -546,6 +584,9 @@ mod tests {
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: Vec::new() }, 10), 0);
         // Counted over the zones, not the rows between them: here rows 0 and 4e9.
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: vec![zone(0, 1, 5), zone(4_000_000_000, 4_000_000_002, 3)] }, 1), 6);
+        // Zones open in the same strip, and one far away: counted from pairs, not slots.
+        let far = vec![zone(0, 15, 2), zone(12, 30, 1), zone(4_000_000_000, 4_000_000_001, 7)];
+        assert_eq!(open_pixels_peak(&ZoneIndex { zones: far }, 10), 48);
     }
     use crate::ops::zonal::Statistic;
     use crate::vector::Coord;
@@ -582,9 +623,16 @@ mod tests {
             strip_windows(&index, 1),
             [Window::new(1, 0, 1, 1), Window::new(2, 4_000_000_007, 4, 1), Window::new(2, 4_000_000_008, 4, 1)]
         );
-        // Zones sharing a strip give one window over both.
+        // Zones sharing a strip give one window over both, from slots per strip and, with a zone
+        // far away, from (zone, strip) pairs.
         let index = ZoneIndex { zones: vec![zone(block(0, 2, 1, 1).collect()), zone(block(1, 2, 5, 3).collect())] };
         assert_eq!(strip_windows(&index, 256), [Window::new(1, 0, 7, 3)]);
+        let mut zones = index.zones;
+        zones.push(zone(block(4_000_000_000, 1, 0, 1).collect()));
+        assert_eq!(
+            strip_windows(&ZoneIndex { zones }, 2),
+            [Window::new(1, 0, 7, 2), Window::new(5, 2, 3, 1), Window::new(0, 4_000_000_000, 1, 1)]
+        );
     }
 
     #[test]

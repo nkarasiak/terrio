@@ -2542,7 +2542,8 @@ class ZonalReducer:
     def windows(self) -> list[_Window]:
         """The windows to supply, in order, as ``(x, y, width, height)``.
 
-        Strips of ``strip_rows`` rows holding zone pixels, cropped to the columns of those pixels.
+        Strips of ``strip_rows`` rows holding zone pixels, cropped to the rows and columns of those
+        pixels.
         ``strip_rows`` defaults to terrio's strip size for one float64 band of this width; give a
         tiled source's block height to read each block once.
         """
