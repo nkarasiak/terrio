@@ -1597,6 +1597,8 @@ struct CachedFile {
     prefix: Option<Arc<[u8]>>,
     /// Blocks, by block size and index.
     blocks: HashMap<(u64, u64), Arc<[u8]>>,
+    /// Byte runs fetched exactly (tiles), by their first byte.
+    extents: BTreeMap<u64, Arc<[u8]>>,
 }
 
 /// A part of a cached file.
@@ -1605,6 +1607,7 @@ enum Slot {
     Whole,
     Prefix,
     Block(u64, u64),
+    Extent(u64),
 }
 
 struct FileCache {
@@ -1631,6 +1634,7 @@ impl FileCache {
             Slot::Whole => file.whole.replace(data.clone()),
             Slot::Prefix => file.prefix.replace(data.clone()),
             Slot::Block(bs, i) => file.blocks.insert((bs, i), data.clone()),
+            Slot::Extent(at) => file.extents.insert(at, data.clone()),
         };
         match old {
             Some(old) => self.bytes = self.bytes.saturating_sub(old.len() as u64),
@@ -1649,9 +1653,10 @@ impl FileCache {
                 Slot::Whole => file.whole.take(),
                 Slot::Prefix => file.prefix.take(),
                 Slot::Block(bs, i) => file.blocks.remove(&(bs, i)),
+                Slot::Extent(at) => file.extents.remove(&at),
             };
             self.bytes = self.bytes.saturating_sub(removed.map_or(0, |d| d.len() as u64));
-            if file.whole.is_none() && file.prefix.is_none() && file.blocks.is_empty() {
+            if file.whole.is_none() && file.prefix.is_none() && file.blocks.is_empty() && file.extents.is_empty() {
                 self.files.remove(&key);
             }
         }
@@ -1690,6 +1695,10 @@ struct Shared {
     whole: Option<Arc<[u8]>>,
     /// The file's first bytes, when the first request was shorter than a block.
     prefix: Option<Arc<[u8]>>,
+    /// Byte runs prefetched exactly (start, bytes), oldest first: ranges of a block or more,
+    /// such as tiles, are fetched as they are rather than widened to whole blocks. Also in the
+    /// process-wide cache, for the other readers of the file.
+    extents: VecDeque<(u64, Arc<[u8]>)>,
 }
 
 impl RangeReader {
@@ -1728,6 +1737,7 @@ impl RangeReader {
             order: VecDeque::new(),
             whole: None,
             prefix: None,
+            extents: VecDeque::new(),
         };
         if let Some(missing) = shared.load_cached(first_len) {
             // The blocks of the first bytes that the process-wide cache no longer holds, each run
@@ -1772,9 +1782,10 @@ impl RangeReader {
         self.lock().map(|s| s.client.url.clone()).unwrap_or_default()
     }
 
-    /// Fetches the blocks covering the byte ranges `(offset, length)` that are not cached yet, in as
-    /// few requests as it can: runs of missing blocks separated by at most two cached blocks are
-    /// fetched together.
+    /// Fetches the byte ranges `(offset, length)` that are not cached yet, in as few requests as
+    /// it can. Ranges of a block or more (tiles) are fetched exactly, those less than a block
+    /// apart together, as GDAL's `AdviseRead` fetches them; smaller ones as the blocks covering
+    /// them, runs of missing blocks separated by at most two cached blocks together.
     pub fn prefetch(&self, ranges: &[(u64, u64)]) -> io::Result<()> {
         let mut s = self.lock()?;
         if s.whole.is_some() {
@@ -1782,16 +1793,33 @@ impl RangeReader {
         }
         s.evict();
         let bs = s.block_size;
-        let mut wanted: Vec<u64> = ranges
+        let mut wanted: Vec<(u64, u64)> = ranges
             .iter()
             .filter(|(off, len)| *len > 0 && *off < s.len)
-            .filter(|(off, len)| s.prefix.as_ref().is_none_or(|p| off + len > p.len() as u64))
-            .flat_map(|(off, len)| *off / bs..=((off + len).min(s.len) - 1) / bs)
-            .filter(|b| !s.blocks.contains_key(b))
+            .map(|&(off, len)| (off, (off + len).min(s.len)))
+            .filter(|&(_, end)| s.prefix.as_ref().is_none_or(|p| end > p.len() as u64))
             .collect();
+        wanted.retain(|&(off, end)| !s.cached(off, end));
         wanted.sort_unstable();
-        wanted.dedup();
-        s.fetch_blocks(&wanted, 2)
+        let mut blocks = Vec::new();
+        let mut i = 0;
+        while i < wanted.len() {
+            let (start, mut end) = wanted[i];
+            i += 1;
+            if end - start < bs {
+                blocks.extend(start / bs..=(end - 1) / bs);
+                continue;
+            }
+            while i < wanted.len() && wanted[i].1 - wanted[i].0 >= bs && wanted[i].0 <= end + bs {
+                end = end.max(wanted[i].1);
+                i += 1;
+            }
+            s.fetch_extent(start, end)?;
+        }
+        blocks.retain(|b| !s.blocks.contains_key(b));
+        blocks.sort_unstable();
+        blocks.dedup();
+        s.fetch_blocks(&blocks, 2)
     }
 
     fn lock(&self) -> io::Result<std::sync::MutexGuard<'_, Shared>> {
@@ -1833,6 +1861,70 @@ impl Shared {
             }
         }
         Some(missing)
+    }
+
+    /// Whether the bytes `start..end` are held: in one exactly fetched run, or in cached blocks.
+    fn cached(&mut self, start: u64, end: u64) -> bool {
+        self.extent(start, end).is_some() || (start / self.block_size..=(end - 1) / self.block_size).all(|b| self.blocks.contains_key(&b))
+    }
+
+    /// The exactly fetched run holding the bytes `start..end`, this reader's or another's of the
+    /// same file (then kept here too): its start and bytes.
+    fn extent(&mut self, start: u64, end: u64) -> Option<(u64, Arc<[u8]>)> {
+        let within = |at: u64, data: &Arc<[u8]>| at <= start && end <= at + data.len() as u64;
+        if let Some((at, data)) = self.extents.iter().find(|(at, data)| within(*at, data)) {
+            return Some((*at, data.clone()));
+        }
+        let shared = file_cache().files.get(&self.key).and_then(|f| {
+            f.extents.range(..=start).rev().find(|(at, data)| within(**at, data)).map(|(at, data)| (*at, data.clone()))
+        })?;
+        self.keep_extent(shared.0, shared.1.clone());
+        Some(shared)
+    }
+
+    /// Keeps a run in this reader; the oldest go once the runs hold more than the cache size.
+    fn keep_extent(&mut self, at: u64, data: Arc<[u8]>) {
+        self.extents.push_back((at, data));
+        let mut held: u64 = self.extents.iter().map(|(_, d)| d.len() as u64).sum();
+        while held > self.shared_budget
+            && self.extents.len() > 1
+            && let Some((_, old)) = self.extents.pop_front()
+        {
+            held -= old.len() as u64;
+        }
+    }
+
+    /// Fetches the bytes `start..end` exactly and keeps them, here and in the process-wide cache,
+    /// the first bytes already held not asked again.
+    fn fetch_extent(&mut self, start: u64, end: u64) -> io::Result<()> {
+        let held: &[u8] = match &self.prefix {
+            Some(p) if (start as usize) < p.len() => &p[start as usize..p.len().min(end as usize)],
+            _ => &[],
+        };
+        let from = start + held.len() as u64;
+        let mut data = held.to_vec();
+        if from < end {
+            let fetched = self.client.fetch(Some((from, end - 1))).map_err(io::Error::other)?;
+            match fetched.status {
+                206 if fetched.data.len() as u64 == end - from => data.extend_from_slice(&fetched.data),
+                200 if fetched.data.len() as u64 == self.len => {
+                    self.store_whole(fetched.data.into());
+                    return Ok(());
+                }
+                status => {
+                    return Err(io::Error::other(format!(
+                        "{}: bytes {from}-{}: unexpected response (status {status}, {} bytes)",
+                        redact(&self.client.url),
+                        end - 1,
+                        fetched.data.len()
+                    )));
+                }
+            }
+        }
+        let data: Arc<[u8]> = data.into();
+        file_cache().store(&self.key, self.len, Slot::Extent(start), data.clone(), self.shared_budget);
+        self.keep_extent(start, data);
+        Ok(())
     }
 
     /// Takes block `b` from the process-wide cache. Returns whether it held it.
@@ -1939,6 +2031,14 @@ impl Shared {
         {
             let n = (end - pos) as usize;
             buf[..n].copy_from_slice(&p[pos as usize..end as usize]);
+            return Ok(n);
+        }
+        if self.whole.is_none()
+            && let Some((at, data)) = self.extent(pos, end)
+        {
+            let from = (pos - at) as usize;
+            let n = (end - pos) as usize;
+            buf[..n].copy_from_slice(&data[from..from + n]);
             return Ok(n);
         }
         if self.whole.is_none() {
@@ -2383,13 +2483,35 @@ mod tests {
         let data = test_data();
         let (url, count) = serve(data.clone(), Mode::Ranges);
         let mut r = RangeReader::open_with(&Remote::Url(url), options()).unwrap();
-        // Blocks 10-11 and 13 merge (gap of one block); block 40 is fetched apart.
-        r.prefetch(&[(40_960, 5000), (13 * 4096 + 5, 10), (40 * 4096, 100)]).unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 3);
+        // Blocks 13 and 15 merge (gap of one block); block 40 is fetched apart. Ranges of a block
+        // or more are fetched exactly, those less than a block apart together: 40,960-45,960 and
+        // 46,000-51,000 in one request.
+        r.prefetch(&[(40_960, 5000), (13 * 4096 + 5, 10), (15 * 4096, 10), (40 * 4096, 100), (46_000, 5000)]).unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 4);
         assert_eq!(read_range(&mut r, 41_000, 4000), data[41_000..45_000]);
-        assert_eq!(read_range(&mut r, 12 * 4096, 4096), data[12 * 4096..13 * 4096]);
+        assert_eq!(read_range(&mut r, 40_960, 10_040), data[40_960..51_000]);
+        assert_eq!(read_range(&mut r, 13 * 4096, 3 * 4096), data[13 * 4096..16 * 4096]);
         assert_eq!(read_range(&mut r, 40 * 4096, 100), data[40 * 4096..40 * 4096 + 100]);
-        assert_eq!(count.load(Ordering::SeqCst), 3);
+        assert_eq!(count.load(Ordering::SeqCst), 4);
+        // Not widened to whole blocks: the byte before the exact range is fetched when read.
+        assert_eq!(read_range(&mut r, 40_959, 1), data[40_959..40_960]);
+        assert_eq!(count.load(Ordering::SeqCst), 5);
+    }
+
+    /// A range fetched exactly by one reader is read by another reader of the file without a
+    /// request, as its blocks are: both in the process-wide cache.
+    #[test]
+    fn an_exact_range_is_shared_with_the_other_readers_of_the_file() {
+        let _serial = cache_test_guard();
+        let data = test_data();
+        let (url, count) = serve(data.clone(), Mode::Ranges);
+        let first = RangeReader::open_with(&Remote::Url(url.clone()), options()).unwrap();
+        first.prefetch(&[(100_003, 9000)]).unwrap();
+        let fetched = count.load(Ordering::SeqCst);
+        let mut second = RangeReader::open_with(&Remote::Url(url), options()).unwrap();
+        second.prefetch(&[(100_003, 9000)]).unwrap();
+        assert_eq!(read_range(&mut second, 101_000, 8000), data[101_000..109_000]);
+        assert_eq!(count.load(Ordering::SeqCst), fetched);
     }
 
     /// A child forked while other threads read remote files reads remote files too: the locks of
