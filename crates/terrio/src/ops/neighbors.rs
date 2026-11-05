@@ -835,10 +835,17 @@ mod tests {
         }
     }
 
-    /// `filter` against `pixel_value` at every pixel, so the row versions give the per-pixel values.
+    /// `filter` against `pixel_value` at every pixel, so the row versions give the per-pixel values:
+    /// on speckled rows (one NaN or nodata pixel in six, computed one pixel at a time) and on sparse
+    /// ones (one in 96, the row path with its nodata windows recomputed).
     #[test]
     fn rows_give_the_per_pixel_values() {
-        let (w, h) = (41, 23);
+        for (w, h, every) in [(41, 23, 12), (203, 23, 192)] {
+            rows_match_pixels(w, h, every);
+        }
+    }
+
+    fn rows_match_pixels(w: usize, h: usize, every: u32) {
         let mut seed = 9u64;
         let mut next = || {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -846,14 +853,19 @@ mod tests {
         };
         // Small integers (many ties), signed zeros, NaN and a nodata value.
         let src: Vec<f32> = (0..w * h)
-            .map(|_| match next() % 12 {
+            .map(|_| match next() % every {
                 0 => -0.0,
                 1 => 0.0,
                 2 => f32::NAN,
                 3 => -9999.0,
-                r => r as f32 - 6.0,
+                r => (r % 12) as f32 - 6.0,
             })
             .collect();
+        if every > 12 {
+            let runs = |r: &[f32]| super::super::window::dirty_runs(r, |v: f32| v.is_nan() || v == -9999.0);
+            assert!(src.chunks(w).all(|r| !super::super::window::is_dense(&runs(r), w)), "no row is speckled");
+            assert!(src.chunks(w).filter(|r| !runs(r).is_empty()).count() > h / 2, "most rows hold nodata");
+        }
         let methods = [
             None,
             Some(NeighborMethod::Max),

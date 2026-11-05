@@ -1091,13 +1091,6 @@ where
     let nd_nan = has_nd && nd.f64().is_nan();
     let line_nd: Vec<bool> = (0..src_rows.len()).map(|r| has_nd && src[r * w..(r + 1) * w].iter().any(|v| v.line_nodata(nd))).collect();
     let line_nd = |r: usize| line_nd[r - s0];
-    // For a row kernel, each row's runs of nodata columns `start..end`.
-    let nd_runs: Vec<Vec<(usize, usize)>> = match &k.row {
-        Some(_) if has_nd => {
-            (0..src_rows.len()).map(|r| super::window::dirty_runs(&src[r * w..(r + 1) * w], |v: T| v.is_nodata(nd, nd_nan))).collect()
-        }
-        _ => Vec::new(),
-    };
     let row = |r: usize| &src[(r - s0) * w..(r - s0 + 1) * w];
     let interpol = |a: T, b: T| T::interpol(a, b, has_nd, nd);
     let compute = |mut win: [T; 9], check: bool| -> f32 {
@@ -1148,14 +1141,19 @@ where
         }
         let win_at = |j: usize| [l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]];
         let mut j = 1;
-        // Rows of speckled nodata go one pixel at a time (`window::dirty_runs`).
-        let dense = check && [i - 1, i, i + 1].iter().any(|&r| nd_runs.get(r - s0).is_some_and(|runs| super::window::is_dense(runs, w)));
+        // For a row kernel, the runs of nodata columns `start..end` of the three rows, found per
+        // output row rather than kept for every row of the strip. Rows of speckled nodata go one
+        // pixel at a time (`window::dirty_runs`).
+        let nd_runs: [Vec<(usize, usize)>; 3] = match &k.row {
+            Some(_) if check => [l1, l2, l3].map(|r| super::window::dirty_runs(r, |v: T| v.is_nodata(nd, nd_nan))),
+            _ => Default::default(),
+        };
+        let dense = nd_runs.iter().any(|runs| super::window::is_dense(runs, w));
         if let Some(row) = k.row.as_ref().filter(|_| !dense) {
             row(l1, l2, l3, o, check);
             if check {
                 // The windows with nodata, from the nodata runs of the three rows.
-                let runs = [i - 1, i, i + 1].map(|r| &nd_runs[r - s0][..]);
-                for (from, to) in super::window::dirty_windows(runs, 1, w) {
+                for (from, to) in super::window::dirty_windows(nd_runs.iter().map(|r| &r[..]), 1, w) {
                     for (j, v) in o.iter_mut().enumerate().take(to.min(w - 1)).skip(from.max(1)) {
                         *v = compute(win_at(j), true);
                     }
