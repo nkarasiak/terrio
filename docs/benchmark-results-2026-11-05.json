@@ -8,7 +8,7 @@
   "PROJ_USER_DATA": "PROJ user data directory",
   "REPORT": "output report"
  },
- "analysis": "Hillshade and slope of the large mosaic, terrio at 696709c (main) and with the row engine of this change, each against GDAL 3.13.3 on the same machine. The first main run failed the background-load gate and is kept for provenance, excluded from the table.",
+ "analysis": "Hillshade and slope of the large mosaic, terrio at 696709c (main) and with the row engine of this change, each against GDAL 3.13.3 on the same machine. The first main run failed the background-load gate and is kept for provenance, excluded from the table. source_commit is the harness checkout; each run's terrio_commit is the commit of the TERRIO_BIN build it measured.",
  "controlled_environment": {
   "GDAL_PAM_ENABLED": "NO",
   "PROJ_NETWORK": "OFF",
@@ -808,6 +808,7 @@
     }
    ],
    "label": "main, best CPU budget (rejected: background load)",
+   "terrio_commit": "696709cddbb4754999f2f5a184b1ddeba569b34d",
    "current": false
   },
   {
@@ -1598,6 +1599,7 @@
     }
    ],
    "label": "main, best CPU budget",
+   "terrio_commit": "696709cddbb4754999f2f5a184b1ddeba569b34d",
    "current": true
   },
   {
@@ -2388,6 +2390,7 @@
     }
    ],
    "label": "this change, best CPU budget",
+   "terrio_commit": "885b5a25939069bc51a81c36e7d681dfbe5837a3",
    "current": true
   },
   {
@@ -2643,6 +2646,7 @@
     }
    ],
    "label": "main, one CPU",
+   "terrio_commit": "696709cddbb4754999f2f5a184b1ddeba569b34d",
    "current": true
   },
   {
@@ -2898,6 +2902,7 @@
     }
    ],
    "label": "this change, one CPU",
+   "terrio_commit": "885b5a25939069bc51a81c36e7d681dfbe5837a3",
    "current": true
   }
  ]

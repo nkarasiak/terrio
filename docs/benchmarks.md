@@ -192,8 +192,9 @@ Hardware: Intel Core i9-14900K, 32 available logical CPUs, Linux. GDAL 3.13.3; T
 optimized release builds. Large-file measurements use five samples; times are median [min–max].
 All rows pass output validation and the background-load gate. A first run of the previous build
 failed that gate and is excluded; it is kept with the others in the
-[raw samples](benchmark-results-2026-11-05.json). These timings come from a different machine than
-the 24 October rerun, so the two tables are not comparable with each other.
+[raw samples](benchmark-results-2026-11-05.json), where each run's `terrio_commit` names the build
+it measured: `696709c` for the previous build, `885b5a2` for this one. These timings come from a
+different machine than the 24 October rerun, so the two tables are not comparable with each other.
 
 | Task | CPUs | previous build | this build | GDAL | terrio vs GDAL |
 |---|---|---|---|---|---|

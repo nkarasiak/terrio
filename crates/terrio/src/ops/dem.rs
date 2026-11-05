@@ -812,8 +812,9 @@ fn f32_within(v: f64) -> (f32, bool) {
 }
 
 /// fdlibm's `atan2` (`e_atan2.c`) without branches: `atan(|y / x|)` moved to `x`'s half-plane and
-/// given `y`'s sign. Within a few ulps of libm's, and exact where `y` is `±0` (`±0` or `±pi`, or
-/// NaN with `x`).
+/// given `y`'s sign. Within a few ulps of libm's. Where `y` is `±0` it gives libm's value exactly:
+/// `±0` when `x` is `+0` or positive, `±pi` when `x` is `-0` or negative (signed as `y`), and NaN
+/// when `x` is NaN.
 #[inline(always)]
 fn atan2_approx(y: f64, x: f64) -> f64 {
     const PI_LO: f64 = f64::from_bits(0x3CA1_A626_3314_5C07);
@@ -823,7 +824,8 @@ fn atan2_approx(y: f64, x: f64) -> f64 {
 
 /// fdlibm's `atan` (FreeBSD `s_atan.c`, as the `libm` crate has it) for `x >= 0`, with the
 /// argument reduction chosen by selects rather than branches; the same operations, so the same
-/// result, for `0 <= x < 2^66` outside `(0, 2^-27)`.
+/// result, for `0 <= x < 2^66`. Below `2^-27`, where fdlibm returns `x`, `x - x * (s1 + s2)` rounds
+/// to `x` too: `s1 + s2` is under `2^-55`, less than half an ulp of `x` relative to it.
 #[inline(always)]
 fn fdlibm_atan_nonneg(x: f64) -> f64 {
     // fdlibm's constants, by their bits.
