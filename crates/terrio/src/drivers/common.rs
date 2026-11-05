@@ -867,7 +867,7 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// The file's first [`HEAD`] bytes, where formats with a signature put it (TIFF, BigTIFF, PNG,
 /// SQLite), are zeroed at once and written last, by [`Rewrite::finish`]: a write interrupted before
 /// (the process killed, the disk full) leaves no such file that opens as a raster of old and new
-/// bytes. Headerless data files rely on their header sidecar instead ([`clear_header`]).
+/// bytes. Headerless data files rely on their header sidecar instead ([`write_headerless`]).
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
@@ -988,19 +988,17 @@ fn clear_header(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
 }
 
 /// [`write_replacing`] for a headerless data file at `path` whose header sidecar `header` the
-/// caller writes after it. The data file is opened first, so a write refused there (a read-only
-/// file) leaves both as they were; the header is then emptied ([`clear_header`]) before the data
-/// goes over the old.
+/// caller writes after it. The data file is first opened without a change, so a write refused
+/// there (a read-only file) leaves both as they were; the header is then emptied ([`clear_header`])
+/// before any byte of the data file changes, and the data goes over the old.
 pub(crate) fn write_headerless(
     path: impl AsRef<std::path::Path>,
     header: impl AsRef<std::path::Path>,
     bytes: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut file = create_replacing(path)?;
+    std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path.as_ref())?;
     clear_header(header)?;
-    file.write_all(bytes.as_ref())?;
-    file.finish()
+    write_replacing(path, bytes)
 }
 
 /// [`std::fs::write`] through [`create_replacing`]: `bytes` written over the file at `path`.
