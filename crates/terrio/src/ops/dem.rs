@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2006, 2009 Matthew Perry
 // SPDX-FileCopyrightText: Copyright (c) 2009-2013, Even Rouault <even dot rouault at spatialys.com>
 // SPDX-FileCopyrightText: Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2018 Jorge Aparicio
 // SPDX-FileCopyrightText: Copyright (c) 2026 Qiusheng Wu and Terrio contributors
 // SPDX-License-Identifier: MIT AND SunPro
 //
