@@ -2,38 +2,22 @@
 
 ## Unreleased
 
-- Remote files read over HTTP(S) share one connection pool for the whole process, keeping up to 64
-  idle connections (ureq keeps 3 per host by default), so files opened from many threads reuse warm
-  connections and TLS sessions. Outside the operations that already shared a client (the /vsi file
-  operations, recursive uploads, deletions and listings), each remote file opened its own client,
-  with 3 idle connections per host, and paid a TCP and TLS handshake, about 0.4 s at a 180 ms round
-  trip. The pool holds one set of settings at a time and is rebuilt when the timeout, connect
-  timeout, user agent or proxy variables change, and in a forked child, which never uses or closes
-  the parent's connections: clients opened before the fork send their requests in the child
-  through the child's pool, and a fork waits for the pool's lock. Opening a STAC item set of 10
-  Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s instead of 27.2 s read eagerly,
-  and 6.7 s instead of 8.1 s read in chunks (one run each; the network varies between runs).
-- GeoTIFF: little-endian Deflate tiles and strips of integer samples, with or without the horizontal
-  predictor, and of floating-point samples without a predictor (Float16 and YCbCr excepted) are
-  decoded by terrio rather than the `tiff` crate: inflated in one call straight into the result with
-  `fdeflate` (pure Rust, a new direct dependency already in the tree through `png`), then the
-  predictor undone as a running sum. A stream ending before the chunk's samples, or with a wrong
-  Adler-32, is an error; one cut in its trailer after the samples is read, as libtiff's zlib decoder
-  reads it (libtiff built with libdeflate refuses it). All 121 tiles of a Sentinel-2 L2A band
-  (Deflate, predictor 2), edge tiles included, decode as the crate decodes them. Inflated in one
-  call (with zlib-rs, the first step), a 1024 x 1024 uint16 tile took 5.7-5.8 ms instead of 6.9-7.1
-  ms through the crate; `fdeflate` then inflates one in 4.7 ms against zlib-rs's 5.4 ms (decoder
-  only) and reads the 10 bands of a Sentinel-2 date whole on one thread in 5.8 s against 6.24 s with
-  zlib-rs, the same pixels.
-- Warps run one row loop per kernel (nearest, bilinear, cubic, the general kernel), store
-  nearest values as they are when the working type is the output type, compute the general
-  kernel's column weights once per pixel (up to 64 columns) and its reach once per chunk, fold
-  `average`'s running mean while visiting the pixels instead of collecting them, and skip the
-  per-band validity re-check of a single band with a unified source mask. The arithmetic and its
-  order are unchanged. Single-threaded, on one 1100 x 1100 uint16 window of a Sentinel-2 band:
-  nearest from EPSG:32615 to EPSG:32616 takes 12 ms of kernel time instead of 29, bilinear to
-  EPSG:4326 at 1e-4 degrees (the general kernel) 64 ms instead of 76; an `average` warp of a
-  Sentinel-2 band to 60 m from its 40 m overview (1830 x 1830) 173 ms instead of 191.
+- Remote files read over HTTP(S) share one connection pool per process (up to 64 idle connections),
+  so files opened one after another or from many threads reuse warm connections rather than each
+  opening its own. The pool is rebuilt when the timeout, connect timeout, user agent or proxy
+  variables change, and in a forked child, which never uses or closes the parent's connections.
+  Opening a STAC item set of 10 Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s
+  instead of 27.2 s (one run).
+- GeoTIFF: Deflate tiles and strips are decoded by terrio with `fdeflate` (pure Rust) when the file
+  and the host are little-endian and the samples are 8-, 16-, 32- or 64-bit integers (with or
+  without the horizontal predictor) or Float32 or Float64 without a predictor. YCbCr and WhiteIsZero
+  images, Float16 and complex samples, and RGB or CMYK images whose extra samples the `tiff` crate
+  misreads keep their previous decoders. A stream ending before the chunk's samples, or with a wrong
+  Adler-32, is an error; one cut in its trailer after the samples is read, as libtiff with zlib
+  reads it. All 121 tiles of a Sentinel-2 L2A band decode as the `tiff` crate decodes them.
+- Warps with nearest, bilinear, cubic, cubic spline, Lanczos or `average` resampling are faster; the
+  arithmetic and its order are unchanged. Nearest from EPSG:32615 to EPSG:32616 of an 1100 x 1100
+  uint16 Sentinel-2 window takes 12 ms of kernel time instead of 29 (single-threaded).
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
