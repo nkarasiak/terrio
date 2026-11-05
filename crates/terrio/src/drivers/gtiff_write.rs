@@ -157,6 +157,17 @@ fn lerc_encode(_data: &[u8], _c: &ChunkInfo, _max_z_error: f64) -> Result<Vec<u8
     Err(Error::disabled("lerc"))
 }
 
+/// Creates the file `path`, first removing a regular file already there as GDAL's `Create()`
+/// does: truncating it in place would wait for the kernel to finish writing back its pages, which
+/// stalls a write that replaces a file written moments before.
+fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::File> {
+    let path = path.as_ref();
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::File::create(path)
+}
+
 fn deflate(data: &[u8]) -> Result<Vec<u8>> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
     enc.write_all(data)?;
@@ -821,7 +832,7 @@ pub(crate) struct Image {
 /// Writes a raster as a GeoTIFF or COG.
 pub(crate) fn write(raster: &Raster, path: &str, opts: &TiffOptions) -> Result<()> {
     let images = prepare(raster, opts)?;
-    let mut file = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+    let mut file = std::io::BufWriter::with_capacity(1 << 20, create_replacing(path)?);
     images.write_to(&mut file)?;
     file.flush()?;
     Ok(())
@@ -2067,7 +2078,7 @@ impl TiffRows {
         if let Some(cm) = plan.color_map {
             tags.push((320, cm));
         }
-        let mut file = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+        let mut file = std::io::BufWriter::with_capacity(1 << 20, create_replacing(path)?);
         let head: Vec<u8> = if big {
             [b"II".as_slice(), &43u16.to_le_bytes(), &8u16.to_le_bytes(), &0u16.to_le_bytes(), &0u64.to_le_bytes()].concat()
         } else {
@@ -2482,7 +2493,7 @@ impl CogWriter {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let file = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(path)?);
+        let file = std::io::BufWriter::with_capacity(1 << 20, create_replacing(path)?);
         Ok(Self {
             file,
             bands: raster.bands,
