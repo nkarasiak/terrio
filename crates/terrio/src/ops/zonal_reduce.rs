@@ -76,41 +76,39 @@ fn zone_strips(index: &ZoneIndex, strip_rows: usize) -> Option<(usize, usize, us
 /// zone pixels, over the rows and columns of the pixels in it. Strips without zone pixels, such
 /// as those between the parts of a multipolygon, are left out.
 pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window> {
-    // (strip, first row, end row, first column, end column) of the zone pixels in a strip.
-    let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
-    match zone_strips(index, strip_rows) {
-        // A slot per strip, when there are fewer strips than (zone, strip) pairs.
-        Some((first, last, crossed)) if last - first < crossed => {
-            let mut slots: Vec<Option<(usize, usize, usize, usize, usize)>> = vec![None; last - first + 1];
-            for span in index.zones.iter().flat_map(|z| &z.spans) {
-                let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
-                let p = slots[row / strip_rows - first].get_or_insert((row / strip_rows, row, row + 1, col, end));
-                *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end));
-            }
-            parts.extend(slots.into_iter().flatten());
+    let window = |(r0, r1, c0, c1): (usize, usize, usize, usize)| Window::new(c0, r0, c1 - c0, r1 - r0);
+    // A slot per strip, when there are fewer strips than (zone, strip) pairs: the first row, end
+    // row, first column and end column of its zone pixels.
+    if let Some((first, last, crossed)) = zone_strips(index, strip_rows)
+        && last - first < crossed
+    {
+        let mut slots: Vec<Option<(usize, usize, usize, usize)>> = vec![None; last - first + 1];
+        for span in index.zones.iter().flat_map(|z| &z.spans) {
+            let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
+            let e = slots[row / strip_rows - first].get_or_insert((row, row + 1, col, end));
+            *e = (e.0.min(row), e.1.max(row + 1), e.2.min(col), e.3.max(end));
         }
-        // Else a part per (zone, strip) pair, merged by strip.
-        _ => {
-            for zone in &index.zones {
-                let zone_parts = parts.len();
-                for span in &zone.spans {
-                    let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
-                    match parts[zone_parts..].last_mut() {
-                        // A zone's spans are in row-major order: its strips come one after another.
-                        Some(p) if p.0 == row / strip_rows => *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end)),
-                        _ => parts.push((row / strip_rows, row, row + 1, col, end)),
-                    }
-                }
+        return slots.into_iter().flatten().map(window).collect();
+    }
+    // Else (strip, first row, end row, first column, end column) per (zone, strip) pair, merged by
+    // strip.
+    let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for zone in &index.zones {
+        let zone_parts = parts.len();
+        for span in &zone.spans {
+            let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
+            match parts[zone_parts..].last_mut() {
+                // A zone's spans are in row-major order: its strips come one after another.
+                Some(p) if p.0 == row / strip_rows => *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end)),
+                _ => parts.push((row / strip_rows, row, row + 1, col, end)),
             }
-            parts.sort_unstable_by_key(|p| p.0);
         }
     }
+    parts.sort_unstable_by_key(|p| p.0);
     parts
         .chunk_by(|a, b| a.0 == b.0)
         .map(|strip| {
-            let (r0, r1, c0, c1) =
-                strip.iter().fold((usize::MAX, 0, usize::MAX, 0), |e, p| (e.0.min(p.1), e.1.max(p.2), e.2.min(p.3), e.3.max(p.4)));
-            Window::new(c0, r0, c1 - c0, r1 - r0)
+            window(strip.iter().fold((usize::MAX, 0, usize::MAX, 0), |e, p| (e.0.min(p.1), e.1.max(p.2), e.2.min(p.3), e.3.max(p.4))))
         })
         .collect()
 }
@@ -127,8 +125,9 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
         Some((first, last, _)) if last - first < 2 * index.zones.len() => {
             let mut change = vec![0i64; last - first + 2];
             for zone in &index.zones {
-                change[zone.row_start / strip_rows - first] += pixels(zone);
-                change[(zone.row_end - 1) / strip_rows + 1 - first] -= pixels(zone);
+                let pixels = pixels(zone);
+                change[zone.row_start / strip_rows - first] += pixels;
+                change[(zone.row_end - 1) / strip_rows + 1 - first] -= pixels;
             }
             change
         }
@@ -137,7 +136,10 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
             let mut pairs: Vec<(usize, i64)> = index
                 .zones
                 .iter()
-                .flat_map(|zone| [(zone.row_start / strip_rows, pixels(zone)), ((zone.row_end - 1) / strip_rows + 1, -pixels(zone))])
+                .flat_map(|zone| {
+                    let pixels = pixels(zone);
+                    [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
+                })
                 .collect();
             pairs.sort_unstable_by_key(|c| c.0);
             pairs.chunk_by(|a, b| a.0 == b.0).map(|strip| strip.iter().map(|c| c.1).sum()).collect()
