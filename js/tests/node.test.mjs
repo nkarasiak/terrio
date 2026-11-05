@@ -3814,10 +3814,10 @@ test("ZonalReducer gives zonalStats' results for arrays supplied window by windo
   for (const [Type, nodata] of types) {
     const data = Type.from(values, (v) => (v === null ? (Number.isNaN(nodata) ? NaN : 0) : v));
     const raster = terrio.rasterFromArray(data, width, height, transform, "EPSG:4326", nodata);
-    for (const allTouched of [false, true]) {
-      const label = `${Type.name} nodata=${nodata} allTouched=${allTouched}`;
-      const expected = terrio.zonalStats(zones, [raster], {stats, allTouched}).toGeoJSON().features;
-      const reducer = new terrio.ZonalReducer(zones, width, height, transform, "EPSG:4326", {stats, allTouched, stripRows: 37});
+    for (const mode of [{}, {allTouched: true}, {fractional: true}]) {
+      const label = `${Type.name} nodata=${nodata} ${JSON.stringify(mode)}`;
+      const expected = terrio.zonalStats(zones, [raster], {stats, ...mode}).toGeoJSON().features;
+      const reducer = new terrio.ZonalReducer(zones, width, height, transform, "EPSG:4326", {stats, ...mode, stripRows: 37});
       assert.equal(reducer.featureCount, 5);
       assert.deepEqual(reducer.stats, stats);
       const stream = reducer.stream(nodata);
@@ -3853,7 +3853,7 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
   assert.throws(() => stream.add(1, new Float64Array(w1 * h1)), /expected window 0/);
   stream.add(0, new Float64Array(w * h));
   assert.throws(() => reducer.stream().finish(), /windows/);
-  for (const [options, message] of [[{stats: ["weighted_mean"]}, /weighted statistics need zonal_stats/], [{stats: ["nope"]}, /unknown zonal statistic/], [{stats: []}, /at least one/], [{nope: 1}, /unknown field/]]) {
+  for (const [options, message] of [[{stats: ["weighted_mean"]}, /weighted statistics need a weighting raster/], [{stats: ["nope"]}, /unknown zonal statistic/], [{stats: []}, /at least one/], [{nope: 1}, /unknown field/]]) {
     assert.throws(() => new terrio.ZonalReducer(zone, 300, 200, transform, "EPSG:4326", options), message);
   }
   assert.throws(() => new terrio.ZonalReducer(zone, 0, 200, transform, "EPSG:4326"), /must have pixels/);
@@ -3868,4 +3868,15 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
   assert.throws(() => done.finish(), /the stream is finished/);
   assert.throws(() => done.add(0, new Uint8Array(w * h)), /the stream is finished/);
   reducer.free();
+  // A dataset of two layers needs the layer option.
+  const a = terrio.fromGeoJSON({type: "FeatureCollection", features: [{type: "Feature", properties: {}, geometry: zone}]}, "a", "EPSG:4326");
+  const b = terrio.fromGeoJSON({type: "FeatureCollection", features: [{type: "Feature", properties: {}, geometry: zone}, {type: "Feature", properties: {}, geometry: zone}]}, "b", "EPSG:4326");
+  const both = terrio.concat([a, b], {mode: "stack"});
+  const names = both.layerNames();
+  assert.equal(names.length, 2);
+  assert.throws(() => new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326"), /must have one layer, or name one with the layer option \(they have 2\)/);
+  assert.equal(new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326", {layer: names[1]}).featureCount, 2);
+  assert.throws(() => new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326", {layer: "missing"}), /no zone layer named 'missing'/);
+  // The zones have a CRS and the grid has none.
+  assert.throws(() => new terrio.ZonalReducer(a, 300, 200, transform, undefined), /both declare a CRS/);
 });

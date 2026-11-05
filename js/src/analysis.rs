@@ -344,7 +344,7 @@ impl JsZonalReducer {
     }
 
     /// The windows to supply, in order, as `[x, y, width, height]`: strips of `stripRows` rows
-    /// holding zone pixels, cropped to the columns of those pixels.
+    /// holding zone pixels, cropped to the rows and columns of those pixels.
     pub fn windows(&self) -> js_sys::Array {
         self.inner
             .windows()
@@ -372,7 +372,7 @@ impl JsZonalReducer {
     }
 }
 
-/// `v` as a count, taken as a number rather than a usize: wasm-bindgen would wrap -1 to
+/// `v` as a whole number (a size or a window index), taken as a number rather than a usize: wasm-bindgen would wrap -1 to
 /// 4294967295 and truncate 300.7.
 fn whole(name: &str, v: f64) -> Result<usize, JsError> {
     if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) {

@@ -479,12 +479,16 @@ def test_zonal_reducer_errors():
     for dtype in (np.float16, np.complex64):
         with pytest.raises(terrio.InvalidArgumentError, match="unsupported array dtype"):
             stream.add(0, np.zeros((h, w), dtype))
-    with pytest.raises(terrio.InvalidArgumentError, match="expected window 0"):
-        stream.add(1, np.zeros((h1, w1)))
+    # The window order is checked before the shape.
+    for shape in ((h1, w1), (1, 1)):
+        with pytest.raises(terrio.InvalidArgumentError, match="expected window 0"):
+            stream.add(1, np.zeros(shape))
     stream.add(0, np.zeros((h, w)))
     with pytest.raises(terrio.InvalidArgumentError, match="windows"):
         reducer.stream().finish()
-    with pytest.raises(terrio.InvalidArgumentError, match="weighted statistics need zonal_stats"):
+    with pytest.raises(
+        terrio.InvalidArgumentError, match="weighted statistics need a weighting raster"
+    ):
         terrio.ZonalReducer(
             zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["weighted_mean"]
         )
@@ -492,6 +496,24 @@ def test_zonal_reducer_errors():
         terrio.ZonalReducer(zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["nope"])
     with pytest.raises(terrio.InvalidArgumentError, match="at least one"):
         terrio.ZonalReducer(zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=[])
+
+
+def test_zonal_reducer_layer_and_crs():
+    zones = reducer_zones().to_geojson()
+    first = terrio.Layer.from_geojson(zones, name="first", crs="EPSG:4326")
+    zones["features"] = zones["features"][:2]
+    second = terrio.Layer.from_geojson(zones, name="second", crs="EPSG:4326")
+    args = (300, 200, REDUCER_TRANSFORM, "EPSG:4326")
+    with pytest.raises(terrio.InvalidArgumentError, match="choose one with layer="):
+        terrio.ZonalReducer([first, second], *args)
+    assert terrio.ZonalReducer([first, second], *args, layer="second").feature_count == 2
+    with pytest.raises(
+        terrio.InvalidArgumentError, match=r"no layer named third \(layers: first, second\)"
+    ):
+        terrio.ZonalReducer([first, second], *args, layer="third")
+    # The zones have a CRS and the grid has none.
+    with pytest.raises(terrio.CRSError, match="both declare a CRS"):
+        terrio.ZonalReducer(first, 300, 200, REDUCER_TRANSFORM)
 
 
 @pytest.mark.parametrize(
