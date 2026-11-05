@@ -27,6 +27,8 @@ pub(super) struct Plan<'a> {
     fids: &'a [u64],
     /// Whether some statistic needs the zone's values sorted.
     keep_values: bool,
+    /// Whether some statistic needs the values' ranks: a median or quantile in binary mode.
+    ranks: bool,
     /// Whether some statistic needs the variance (a running mean and M2 per pixel).
     moments: bool,
     weighted_sum: bool,
@@ -47,6 +49,7 @@ impl<'a> Plan<'a> {
             fractional,
             fids,
             keep_values: stats.iter().any(|s| s.needs_values()),
+            ranks: !fractional && stats.iter().any(|s| matches!(s, Statistic::Median | Statistic::Quantile(_))),
             moments: stats.iter().any(|s| matches!(s, Statistic::StdDev | Statistic::Variance | Statistic::Cv)),
             weighted_sum: stats.contains(&Statistic::WeightedSum),
             weighted_mean: stats.contains(&Statistic::WeightedMean),
@@ -56,7 +59,7 @@ impl<'a> Plan<'a> {
 
     fn empty(&self) -> Vec<FieldValue> {
         let blank = Accumulator::default();
-        self.stats.iter().map(|&s| blank.stat(s, self, &[])).collect()
+        self.stats.iter().map(|&s| blank.stat(s, self, &[], &[])).collect()
     }
 }
 
@@ -90,10 +93,11 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
         .collect()
 }
 
-/// The most pixels of the zones open at once while strips of `strip_rows` rows are reduced, each
-/// zone counting at most `per_zone` ([`values_per_zone`]): what each band's value lists hold at
-/// their peak, as `reduce_source` opens a zone at the strip of its first row and finishes it after
-/// the strip of its last.
+/// The most pixels of the zones open at once while strips of `strip_rows` rows are reduced: what
+/// each band's value lists hold at their peak, as `reduce_source` opens a zone at the strip of its
+/// first row and finishes it after the strip of its last. A zone of more than `per_zone` pixels
+/// ([`values_per_zone`]) counts twice `per_zone`: its list and histogram, held together while it
+/// switches to the histogram.
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: usize) -> usize {
     let strip_rows = strip_rows.max(1);
     // (strip, change in open pixels): two per zone, so memory follows the zones, not the grid.
@@ -101,7 +105,8 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: u
         .zones
         .iter()
         .flat_map(|zone| {
-            let pixels = zone.spans.iter().map(|s| s.len as usize).sum::<usize>().min(per_zone) as i64;
+            let pixels = zone.spans.iter().map(|s| s.len as usize).sum::<usize>();
+            let pixels = if pixels > per_zone { per_zone.saturating_mul(2) } else { pixels } as i64;
             [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
         })
         .collect();
@@ -132,13 +137,14 @@ pub(super) fn reduce_source(
     ahead: usize,
 ) -> Result<Vec<Vec<Vec<FieldValue>>>> {
     let windows = strip_windows(index, strip_rows.max(1));
+    let data_type = raster.data_type();
     let read_bands = WindowOptions { bands: bands.iter().map(|b| b.band).collect(), overview: None };
     // Reads share one handle each: reads of a raster take turns, but overlap the reduction.
     let raster = std::sync::Mutex::new(raster);
     let weight_band = weight.as_ref().map(|w| (w.band, w.nodata));
     let weight_raster = std::sync::Mutex::new(weight.map(|w| w.raster));
     let lock = |m| Error::InvalidArgument(format!("zonal {m} reader lock poisoned"));
-    let mut state = StreamState::new(bands.iter().map(|b| b.nodata).collect(), plan);
+    let mut state = StreamState::new(bands.iter().map(|b| b.nodata).collect(), plan, Some(data_type));
     crate::ops::strips::read_ahead_by(
         ahead,
         windows.len(),
@@ -163,6 +169,9 @@ pub(super) fn reduce_source(
 pub(super) struct StreamState {
     /// Per band.
     nodata: Vec<Option<f64>>,
+    /// The sample type whose values zones count in a histogram ([`histogram_range`]): the
+    /// raster's, which its band grouping counts on, or else that of the strip opening a zone.
+    data_type: Option<DataType>,
     /// Open zones: (zone, next span, one accumulator per band).
     open: Vec<(usize, usize, Vec<Accumulator>)>,
     /// The next zone to open.
@@ -172,11 +181,11 @@ pub(super) struct StreamState {
 }
 
 impl StreamState {
-    pub fn new(nodata: Vec<Option<f64>>, plan: &Plan<'_>) -> Self {
+    pub fn new(nodata: Vec<Option<f64>>, plan: &Plan<'_>, data_type: Option<DataType>) -> Self {
         let features = plan.fids.len();
         let empty = plan.empty();
         let out = nodata.iter().map(|_| empty.iter().map(|v| vec![v.clone(); features]).collect()).collect();
-        Self { nodata, open: Vec::new(), next: 0, out }
+        Self { nodata, data_type, open: Vec::new(), next: 0, out }
     }
 
     /// Adds `strip`, the pixels of `window` (band after band), with the weights of the same window
@@ -194,16 +203,18 @@ impl StreamState {
         let r1 = r0 + height;
         let bands = self.nodata.len();
         while self.next < zones.len() && zones[self.next].row_start < r1 {
-            // Value lists hold at most the zone's pixels, or `HISTOGRAM_BINS` of an 8- or 16-bit
-            // band: reserved once.
+            // Value lists hold at most the zone's pixels, or as many as a histogram has bins:
+            // reserved once.
+            let range = histogram_range(self.data_type.unwrap_or(strip.data_type)).filter(|_| plan.keep_values);
             let pixels = if plan.keep_values {
-                zones[self.next].spans.iter().map(|s| s.len as usize).sum::<usize>().min(values_per_zone(strip.data_type))
+                zones[self.next].spans.iter().map(|s| s.len as usize).sum::<usize>().min(range.map_or(usize::MAX, |r| r.1))
             } else {
                 0
             };
             let accumulator = || Accumulator {
                 values: Vec::with_capacity(pixels),
                 coverages: Vec::with_capacity(if plan.fractional { pixels } else { 0 }),
+                range,
                 ..Default::default()
             };
             self.open.push((self.next, 0, (0..bands).map(|_| accumulator()).collect()));
@@ -264,7 +275,17 @@ impl StreamState {
                     .iter_mut()
                     .map(|acc| {
                         let bins = if plan.keep_values { acc.bins(plan.fractional) } else { Vec::new() };
-                        plan.stats.iter().map(|&stat| acc.stat(stat, plan, &bins)).collect::<Vec<_>>()
+                        let ranks: Vec<f64> = if plan.ranks {
+                            bins.iter()
+                                .scan(0.0, |n, b| {
+                                    *n += b.1;
+                                    Some(*n)
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        plan.stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect::<Vec<_>>()
                     })
                     .collect();
             }
@@ -348,53 +369,62 @@ struct Accumulator {
     values: Vec<f64>,
     /// Their coverages, in fractional mode (binary coverage is 1).
     coverages: Vec<f64>,
-    /// Once a zone holds `HISTOGRAM_BINS` values of an 8- or 16-bit band, the weight (pixel count,
-    /// or coverage sum in fractional mode) of each integer from `HISTOGRAM_FIRST`: it takes those
-    /// values from then on, the lists only the others. Empty until then.
+    /// The integers a histogram counts for this band ([`histogram_range`]), if any.
+    range: Option<(f64, usize)>,
+    /// Once the lists hold as many values as `range` has integers, the weight (pixel count, or
+    /// coverage sum in fractional mode) of each of them: it takes the values it counts from then
+    /// on, the lists only the others (-0, fractions, values out of range). Empty until then.
     histogram: Vec<f64>,
 }
 
-/// The integers a histogram counts, from `HISTOGRAM_FIRST`: every value of an 8- or 16-bit band.
-const HISTOGRAM_BINS: usize = 98_304;
-const HISTOGRAM_FIRST: f64 = -32_768.0;
+/// The integers a histogram counts for a band of `data_type`, every value of an 8- or 16-bit
+/// integer type: the first and how many.
+pub(super) fn histogram_range(data_type: DataType) -> Option<(f64, usize)> {
+    match data_type {
+        DataType::U8 => Some((0.0, 256)),
+        DataType::I8 => Some((-128.0, 256)),
+        DataType::U16 => Some((0.0, 65_536)),
+        DataType::I16 => Some((-32_768.0, 65_536)),
+        _ => None,
+    }
+}
 
-/// The most values an accumulator lists for a zone of a band of `data_type`: `HISTOGRAM_BINS`
-/// for 8- and 16-bit integers, which a histogram counts past that.
+/// The most values an accumulator lists for a zone of a band of `data_type` before a histogram
+/// counts them ([`histogram_range`]).
 pub(super) fn values_per_zone(data_type: DataType) -> usize {
-    if counted(data_type) { HISTOGRAM_BINS } else { usize::MAX }
+    histogram_range(data_type).map_or(usize::MAX, |r| r.1)
 }
 
-fn counted(data_type: DataType) -> bool {
-    matches!(data_type, DataType::U8 | DataType::I8 | DataType::U16 | DataType::I16)
-}
-
-/// The histogram bin of `v`, if it counts it: an integer from `HISTOGRAM_FIRST` (-0 counts as 0).
+/// The bin of `v` among `bins` integers from `first`, if it is one of them. -0 is not: sorted by
+/// `total_cmp`, it comes apart from 0.
 #[inline]
-fn histogram_bin(v: f64) -> Option<usize> {
-    // Saturating: below the first bin is 0, NaN is 0, and either fails the round trip.
-    let bin = (v - HISTOGRAM_FIRST) as usize;
-    (bin < HISTOGRAM_BINS && HISTOGRAM_FIRST + bin as f64 == v).then_some(bin)
+fn bin(v: f64, first: f64, bins: usize) -> Option<usize> {
+    // Saturating: below `first` and NaN give 0, which fails the round trip.
+    let bin = (v - first) as usize;
+    (bin < bins && (first + bin as f64).to_bits() == v.to_bits()).then_some(bin)
 }
 
-/// Equal values of `values` merged as `(value, count)` in increasing order.
+/// The integers radix-sorted keys stand for, from `KEYS_FIRST`: every value of an 8- or 16-bit
+/// integer type.
+const KEYS_FIRST: f64 = -32_768.0;
+const KEYS: usize = 98_304;
+
+/// `values` as `(value, count)` bins of identical values (-0 apart from 0) in `total_cmp` order.
 fn counts(mut values: Vec<f64>) -> Vec<(f64, f64)> {
-    // Integers the histogram counts (but -0, which `total_cmp` sorts apart: the round trip of its
-    // bits fails), as 17-bit keys sorted by radix, faster than comparing the values.
-    let key = |v: f64| (v - HISTOGRAM_FIRST) as u32;
-    let counted = |v: f64| (key(v) as usize) < HISTOGRAM_BINS && (HISTOGRAM_FIRST + f64::from(key(v))).to_bits() == v.to_bits();
-    if values.iter().all(|&v| counted(v)) {
-        let mut keys: Vec<u32> = values.iter().map(|&v| key(v)).collect();
+    // Integers of 8- or 16-bit types, as 17-bit keys sorted by radix: faster than comparing.
+    if values.iter().all(|&v| bin(v, KEYS_FIRST, KEYS).is_some()) {
+        let mut keys: Vec<u32> = values.iter().map(|&v| (v - KEYS_FIRST) as u32).collect();
         drop(values);
         radix_sort(&mut keys);
-        return keys.chunk_by(|a, b| a == b).map(|run| (HISTOGRAM_FIRST + run[0] as f64, run.len() as f64)).collect();
+        return keys.chunk_by(|a, b| a == b).map(|run| (KEYS_FIRST + f64::from(run[0]), run.len() as f64)).collect();
     }
     values.sort_unstable_by(f64::total_cmp);
-    values.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as f64)).collect()
+    values.chunk_by(|a, b| a.to_bits() == b.to_bits()).map(|run| (run[0], run.len() as f64)).collect()
 }
 
-/// Sorts keys below 2^17 (histogram bins): a least-significant-digit radix sort of 9 then 8 bits.
+/// Sorts keys below 2^17 (`KEYS`): a least-significant-digit radix sort of 9 then 8 bits.
 fn radix_sort(keys: &mut Vec<u32>) {
-    const _: () = assert!(HISTOGRAM_BINS <= 1 << 17);
+    const _: () = assert!(KEYS <= 1 << 17);
     let mut sorted = vec![0u32; keys.len()];
     for (shift, bits) in [(0, 9), (9, 8)] {
         let digit = |k: u32| ((k >> shift) & ((1 << bits) - 1)) as usize;
@@ -460,7 +490,8 @@ impl Accumulator {
         self.summary.add(v, coverage, plan.moments);
         if plan.keep_values {
             if !self.histogram.is_empty()
-                && let Some(bin) = histogram_bin(v)
+                && let Some((first, bins)) = self.range
+                && let Some(bin) = bin(v, first, bins)
             {
                 self.histogram[bin] += if plan.fractional { coverage } else { 1.0 };
                 return true;
@@ -469,20 +500,23 @@ impl Accumulator {
             if plan.fractional {
                 self.coverages.push(coverage);
             }
-            if self.values.len() >= HISTOGRAM_BINS && self.histogram.is_empty() && counted(data_type) {
-                self.start_histogram(plan.fractional);
+            if self.histogram.is_empty()
+                && let Some((first, bins)) = self.range
+                && self.values.len() >= bins
+            {
+                self.start_histogram(first, bins, plan.fractional);
             }
         }
         true
     }
 
     /// Moves the listed values the histogram counts into it, in the order they were added.
-    fn start_histogram(&mut self, fractional: bool) {
-        let mut histogram = vec![0.0; HISTOGRAM_BINS];
+    fn start_histogram(&mut self, first: f64, bins: usize, fractional: bool) {
+        let mut histogram = vec![0.0; bins];
         let mut kept = 0;
         for i in 0..self.values.len() {
             let v = self.values[i];
-            match histogram_bin(v) {
+            match bin(v, first, bins) {
                 Some(bin) => histogram[bin] += if fractional { self.coverages[i] } else { 1.0 },
                 None => {
                     self.values[kept] = v;
@@ -500,10 +534,11 @@ impl Accumulator {
         self.histogram = histogram;
     }
 
-    /// The kept values as `(value, weight)` bins of equal values in increasing order, the weight
-    /// being their pixel count, or in fractional mode their coverage sum; the lists and histogram
-    /// are emptied. Coverages are summed in sorted order (unstable) in the lists, in the order
-    /// they were added in the histogram, so their rounding can differ.
+    /// The kept values as `(value, weight)` bins in `total_cmp` order; the lists and histogram are
+    /// emptied. In binary mode, a bin holds identical values (-0 apart from 0, as their ranks are)
+    /// weighted by their count; in fractional mode, equal values weighted by their coverage sum:
+    /// summed in sorted order (unstable) in the lists, in the order they were added in the
+    /// histogram, so their rounding can differ.
     fn bins(&mut self, fractional: bool) -> Vec<(f64, f64)> {
         let values = std::mem::take(&mut self.values);
         let listed: Vec<(f64, f64)> = if fractional {
@@ -521,23 +556,26 @@ impl Accumulator {
             counts(values)
         };
         let histogram = std::mem::take(&mut self.histogram);
-        if histogram.is_empty() {
-            return listed;
-        }
-        // The listed values are those the histogram does not count: no value is in both.
+        let Some((first, _)) = self.range.filter(|_| !histogram.is_empty()) else { return listed };
+        // The listed values are those the histogram does not count: -0 at most is equal to one.
         let mut listed = listed.into_iter().peekable();
         let mut bins = Vec::new();
         for (i, &weight) in histogram.iter().enumerate().filter(|b| *b.1 > 0.0) {
-            let v = HISTOGRAM_FIRST + i as f64;
-            bins.extend(std::iter::from_fn(|| listed.next_if(|l| l.0 < v)));
-            bins.push((v, weight));
+            let v = first + i as f64;
+            bins.extend(std::iter::from_fn(|| listed.next_if(|l| l.0.total_cmp(&v).is_lt())));
+            match bins.last_mut() {
+                // A listed -0 and a counted 0 are one bin in fractional mode, as in the lists.
+                Some(last) if fractional && last.0 == v => last.1 += weight,
+                _ => bins.push((v, weight)),
+            }
         }
         bins.extend(listed);
         bins
     }
 
-    /// `bins` is [`Accumulator::bins`] when the statistic needs values.
-    fn stat(&self, stat: Statistic, plan: &Plan<'_>, bins: &[(f64, f64)]) -> FieldValue {
+    /// `bins` is [`Accumulator::bins`] when the statistic needs values, `ranks` their cumulative
+    /// weights when the plan needs ranks.
+    fn stat(&self, stat: Statistic, plan: &Plan<'_>, bins: &[(f64, f64)], ranks: &[f64]) -> FieldValue {
         if stat.uses_weights() {
             return if self.invalid_weight || self.summary.count == 0 {
                 FieldValue::Null
@@ -553,7 +591,7 @@ impl Accumulator {
                 })
             };
         }
-        self.summary.stat(stat, bins, plan.fractional)
+        self.summary.stat(stat, bins, ranks, plan.fractional)
     }
 }
 
@@ -591,12 +629,12 @@ impl Summary {
         self.max = self.max.max(value);
     }
 
-    fn stat(&self, stat: Statistic, bins: &[(f64, f64)], fractional: bool) -> FieldValue {
+    fn stat(&self, stat: Statistic, bins: &[(f64, f64)], ranks: &[f64], fractional: bool) -> FieldValue {
         match stat {
             Statistic::Count => {
                 return if fractional { FieldValue::Float(self.weight) } else { FieldValue::Integer(self.count as i64) };
             }
-            Statistic::Variety => return FieldValue::Integer(bins.len() as i64),
+            Statistic::Variety => return FieldValue::Integer(merged(bins).count() as i64),
             _ if self.count == 0 => return FieldValue::Null,
             _ => {}
         }
@@ -611,12 +649,12 @@ impl Summary {
             Statistic::Variance => variance,
             Statistic::Cv if mean == 0.0 => return FieldValue::Null,
             Statistic::Cv => variance.sqrt() / mean,
-            Statistic::Median => quantile(bins, 0.5, fractional, self.count),
-            Statistic::Quantile(p) => quantile(bins, p / 100.0, fractional, self.count),
+            Statistic::Median => quantile(bins, ranks, 0.5, fractional),
+            Statistic::Quantile(p) => quantile(bins, ranks, p / 100.0, fractional),
             // Bins ascend by value: `>=` lets a later (larger) value win a mode tie, `<` keeps the
             // earlier (smaller) value on a minority tie, as exactextract 0.3.0 does.
-            Statistic::Mode => bins.iter().fold((f64::NAN, f64::NEG_INFINITY), |b, &(v, w)| if w >= b.1 { (v, w) } else { b }).0,
-            Statistic::Minority => bins.iter().fold((f64::NAN, f64::INFINITY), |b, &(v, w)| if w < b.1 { (v, w) } else { b }).0,
+            Statistic::Mode => merged(bins).fold((f64::NAN, f64::NEG_INFINITY), |b, (v, w)| if w >= b.1 { (v, w) } else { b }).0,
+            Statistic::Minority => merged(bins).fold((f64::NAN, f64::INFINITY), |b, (v, w)| if w < b.1 { (v, w) } else { b }).0,
             Statistic::Count | Statistic::Variety | Statistic::WeightedMean | Statistic::WeightedSum | Statistic::WeightedStdDev => {
                 unreachable!()
             }
@@ -624,26 +662,26 @@ impl Summary {
     }
 }
 
-/// Quantile `q` (0 to 1) of the non-empty [`Accumulator::bins`] of `count` values: exactextract's
-/// weighted quantile in fractional mode, else linear interpolation between the closest ranks
-/// (numpy's default), with a halfway point taken by `f64::midpoint` so the 0.5 quantile is the
-/// median of two middle values.
-fn quantile(bins: &[(f64, f64)], q: f64, fractional: bool, count: usize) -> f64 {
+/// Bins of equal values (-0 with 0) merged, value of the first, weights summed.
+fn merged(bins: &[(f64, f64)]) -> impl Iterator<Item = (f64, f64)> + '_ {
+    bins.chunk_by(|a, b| a.0 == b.0).map(|run| (run[0].0, run.iter().map(|b| b.1).sum()))
+}
+
+/// Quantile `q` (0 to 1) of the non-empty [`Accumulator::bins`]: exactextract's weighted quantile
+/// in fractional mode, else linear interpolation between the closest ranks (numpy's default),
+/// with a halfway point taken by `f64::midpoint` so the 0.5 quantile is the median of two middle
+/// values. `ranks` are the bins' cumulative counts in binary mode.
+fn quantile(bins: &[(f64, f64)], ranks: &[f64], q: f64, fractional: bool) -> f64 {
     if fractional {
         return super::fractional::quantile(bins, q);
     }
-    let h = (count - 1) as f64 * q;
+    let h = (ranks[ranks.len() - 1] - 1.0) * q;
     let lo = h.floor() as usize;
     let fraction = h - lo as f64;
     // The values of ranks `lo` and `lo + 1` (from 0), the second only when interpolated.
-    let mut seen = 0.0;
-    let at = bins.iter().position(|b| {
-        seen += b.1;
-        seen > lo as f64
-    });
-    let Some(at) = at else { return f64::NAN };
+    let at = ranks.partition_point(|&r| r <= lo as f64);
     let a = bins[at].0;
-    let b = if seen > (lo + 1) as f64 { a } else { bins.get(at + 1).map_or(a, |b| b.0) };
+    let b = if ranks[at] > (lo + 1) as f64 { a } else { bins.get(at + 1).map_or(a, |b| b.0) };
     if fraction == 0.0 {
         a
     } else if fraction == 0.5 {
@@ -673,8 +711,9 @@ mod tests {
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, usize::MAX), 100);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones[..2].to_vec() }, 10, usize::MAX), 48);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: Vec::new() }, 10, usize::MAX), 0);
-        // Each zone counted at most `per_zone` pixels: 20 + 18 together in strip 1.
-        assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, 20), 38);
+        // A zone over `per_zone` pixels counts twice `per_zone` (list and histogram): 40 + 18
+        // together in strip 1, 40 alone in strip 4.
+        assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, 20), 58);
         // Counted over the zones, not the rows between them: here rows 0 and 4e9.
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: vec![zone(0, 1, 5), zone(4_000_000_000, 4_000_000_002, 3)] }, 1, usize::MAX), 6);
     }
@@ -721,10 +760,50 @@ mod tests {
     #[test]
     fn binary_quantiles_of_extreme_values_of_opposite_signs_stay_finite() {
         let sorted = [(-f64::MAX, 1.0), (f64::MAX, 1.0)];
-        let q25 = super::quantile(&sorted, 0.25, false, 2);
+        let q25 = super::quantile(&sorted, &[1.0, 2.0], 0.25, false);
         assert!((q25 / (-f64::MAX / 2.0) - 1.0).abs() < 1e-15, "{q25}");
-        assert_eq!(super::quantile(&sorted, 0.5, false, 2), 0.0);
-        assert_eq!(super::quantile(&[(1.0, 1.0), (3.0, 1.0)], 0.25, false, 2), 1.5);
+        assert_eq!(super::quantile(&sorted, &[1.0, 2.0], 0.5, false), 0.0);
+        assert_eq!(super::quantile(&[(1.0, 1.0), (3.0, 1.0)], &[1.0, 2.0], 0.25, false), 1.5);
+    }
+
+    /// The statistics of `acc` as a finished zone computes them.
+    fn finish(acc: &mut super::Accumulator, plan: &Plan<'_>, stats: &[Statistic], fractional: bool) -> Vec<crate::FieldValue> {
+        let bins = acc.bins(fractional);
+        let ranks: Vec<f64> = bins
+            .iter()
+            .scan(0.0, |n, b| {
+                *n += b.1;
+                Some(*n)
+            })
+            .collect();
+        stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect()
+    }
+
+    /// -0 and 0 keep their own ranks, as when the values were sorted one by one, and are one value
+    /// for mode and variety.
+    #[test]
+    fn signed_zeros_keep_their_ranks() {
+        let names = "median quantile_25 mode variety";
+        let stats: Vec<Statistic> = names.split(' ').map(|s| Statistic::parse(s).unwrap()).collect();
+        let plan = Plan::new(&stats, false, &[0]);
+        let bits = |values: &[f64]| {
+            let mut acc = super::Accumulator::default();
+            for &v in values {
+                acc.add_value(v, None, DataType::F64, 1.0, &plan);
+            }
+            finish(&mut acc, &plan, &stats, false)
+                .into_iter()
+                .map(|v| match v {
+                    FieldValue::Float(f) => f.to_bits(),
+                    FieldValue::Integer(i) => i as u64,
+                    v => panic!("{v:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // midpoint(-0, 0) is 0.
+        assert_eq!(bits(&[0.0, -0.0])[0], 0.0f64.to_bits());
+        let got = bits(&[0.0, 5.0, -0.0, 0.0, -0.0]);
+        assert_eq!(got, [0.0f64.to_bits(), (-0.0f64).to_bits(), (-0.0f64).to_bits(), 2]);
     }
 
     #[test]
@@ -753,12 +832,12 @@ mod tests {
         assert_eq!(mean(&["mean", "stddev", "cv"]), expected);
     }
 
-    /// Zones of more than `HISTOGRAM_BINS` pixels of 8- and 16-bit bands are counted in a
-    /// histogram: the same results as the value lists of the same values in a Float64 band.
+    /// Zones of more pixels than an 8- or 16-bit band has values are counted in a histogram: the
+    /// same results as the value lists of the same values in a Float64 band.
     #[test]
     fn counted_integer_bands_match_listed_float_bands() {
         let (cols, rows) = (400, 300);
-        assert!(cols * rows > super::HISTOGRAM_BINS);
+        assert!(cols * rows > 65_536);
         let mut layer = Layer::new("zones");
         let geometries = [
             Geometry::polygon(ring(0., 0., cols as f64, rows as f64), vec![]),
@@ -812,20 +891,21 @@ mod tests {
     }
 
     /// A zone fed windows of several sample types (a `ZonalStream`) once its histogram is
-    /// started: values it does not count (fractions, out of range) stay listed.
+    /// started: values it does not count (-0, fractions, out of range) stay listed.
     #[test]
     fn histogram_keeps_listing_values_it_does_not_count() {
-        use super::{Accumulator, HISTOGRAM_BINS};
+        use super::{Accumulator, histogram_range};
         let stats: Vec<Statistic> = ["median", "quantile_0", "quantile_25", "quantile_99", "quantile_100", "mode", "minority", "variety"]
             .iter()
             .map(|s| Statistic::parse(s).unwrap())
             .collect();
-        let others = [2.5, 70_000.0, -40_000.0, -3.0, 1e9, 2.5, 7.0, -0.5, 65_535.0, -32_768.0, 70_000.0];
+        let others = [2.5, 70_000.0, -40_000.0, -3.0, 1e9, 2.5, 7.0, -0.5, 65_535.0, -32_768.0, 70_000.0, -0.0, -0.0];
         for fractional in [false, true] {
             let plan = Plan::new(&stats, fractional, &[0]);
             let coverage = |i: usize| if fractional { [1.0, 0.25, 0.5, 0.125][i % 4] } else { 1.0 };
-            let (mut counted, mut listed) = (Accumulator::default(), Accumulator::default());
-            for i in 0..HISTOGRAM_BINS + 1000 {
+            let range = histogram_range(DataType::U16);
+            let (mut counted, mut listed) = (Accumulator { range, ..Default::default() }, Accumulator::default());
+            for i in 0..range.unwrap().1 + 1000 {
                 let v = ((i * i) % 1000) as f64;
                 counted.add_value(v, None, DataType::U16, coverage(i), &plan);
                 listed.add_value(v, None, DataType::F64, coverage(i), &plan);
@@ -835,13 +915,21 @@ mod tests {
                 counted.add_value(v, None, DataType::F64, coverage(i), &plan);
                 listed.add_value(v, None, DataType::F64, coverage(i), &plan);
             }
-            assert_eq!(counted.values.len(), 7);
+            assert_eq!(counted.values.len(), 11);
             // Coverages are exact binary fractions here: their sums do not depend on the order.
-            let (c, l) = (counted.bins(fractional), listed.bins(fractional));
-            assert_eq!(c, l, "fractional {fractional}");
-            for &stat in &stats {
-                assert_eq!(counted.stat(stat, &plan, &c), listed.stat(stat, &plan, &l), "{stat:?} fractional {fractional}");
+            let bits = |acc: &mut Accumulator| acc.bins(fractional).iter().map(|b| (b.0.to_bits(), b.1)).collect::<Vec<_>>();
+            assert_eq!(bits(&mut counted), bits(&mut listed), "fractional {fractional}");
+        }
+        for fractional in [false, true] {
+            let plan = Plan::new(&stats, fractional, &[0]);
+            let (mut counted, mut listed) =
+                (Accumulator { range: histogram_range(DataType::U16), ..Default::default() }, Accumulator::default());
+            for (i, v) in (0..70_000u64).map(|i| ((i * i) % 1000) as f64).chain(others).enumerate() {
+                let coverage = if fractional { [1.0, 0.25, 0.5, 0.125][i % 4] } else { 1.0 };
+                counted.add_value(v, None, DataType::U16, coverage, &plan);
+                listed.add_value(v, None, DataType::F64, coverage, &plan);
             }
+            assert_eq!(finish(&mut counted, &plan, &stats, fractional), finish(&mut listed, &plan, &stats, fractional));
         }
     }
 
@@ -851,14 +939,14 @@ mod tests {
         let reference = |values: &[f64]| {
             let mut sorted = values.to_vec();
             sorted.sort_unstable_by(f64::total_cmp);
-            sorted.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as f64)).collect::<Vec<_>>()
+            sorted.chunk_by(|a, b| a.to_bits() == b.to_bits()).map(|run| (run[0], run.len() as f64)).collect::<Vec<_>>()
         };
         let integers: Vec<f64> = (0..20_000u64).map(|i| ((i * i * 7919 + i) % 98_304) as f64 - 32_768.0).collect();
         assert!(integers.contains(&-32_768.0) && integers.iter().any(|&v| v > 60_000.0));
         let cases = [
             integers.clone(),
             [integers.clone(), vec![65_535.0, -32_768.0, 0.0, 0.0]].concat(),
-            // Not all counted: compared, -0 apart from 0 as `total_cmp` sorts it, merged by `==`.
+            // Not all counted: compared, -0 apart from 0.
             [integers.clone(), vec![0.5]].concat(),
             vec![0.0, -0.0, 3.0, -0.0],
             vec![70_000.0, 1.0, 1.0],

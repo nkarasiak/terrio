@@ -353,8 +353,11 @@ fn strip_rows(raster: &LazyRaster, bands: usize) -> usize {
 /// without zones, so rasters are never loaded whole. Median, quantiles, mode, minority and variety
 /// keep the values of each zone being reduced, for every band of every source read at once (as
 /// many as the pool has threads): memory grows with zone size, not with the raster. Of 8- and
-/// 16-bit integer bands, a zone keeps at most 98,304 values and counts the rest in a histogram of
-/// 768 KiB, with the same results.
+/// 16-bit integer bands, a zone keeps at most as many values as the type has (256 or 65,536) and
+/// counts the rest in a histogram (2 or 512 KiB). Results are the same, but with fractional
+/// coverage: a counted zone sums its coverages in another order, so their rounding can change its
+/// quantiles in the last digits, or which of two values whose coverage sums tie within rounding is
+/// its mode or minority.
 ///
 /// `dst_srs` reprojects output geometries after analysis; `decimal_places` rounds only newly
 /// computed floating statistics. Both are optional and leave integer counts and source attributes intact.
@@ -572,7 +575,8 @@ pub fn zonal_stats_with(
         let mut weight_raster = weights.map(|w| w.lock().map(|mut r| r.shared())).transpose()?;
         let zone_index = grids[grid].1.as_ref().expect("built above");
         // Statistics that keep values hold every open zone's values for each band reduced at once:
-        // of an 8- or 16-bit band, at most `values_per_zone` (a histogram counts the rest). Bands
+        // of an 8- or 16-bit band, at most `values_per_zone` (a histogram counts the rest; a zone
+        // holds both while it switches, which `open_pixels_peak` counts). Bands
         // are reduced in groups whose values take at most `VALUES_PER_PASS` (one band at a time
         // when one band's take more), so that a zone covering a whole multi-band float raster
         // holds one band's values, as 0.7.0 did. Each further pass reads the raster again. Passes
@@ -665,9 +669,9 @@ fn release_freed_memory() {
 /// zones are computed once for the grid, then each [`ZonalReducer::stream`] reduces one band.
 /// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
 /// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
-/// coverage), at most 98,304 of them for 8- and 16-bit integer data (a histogram of 768 KiB
-/// counts the rest), outside `zonal_stats`' shared budget: feed streams one at a time to bound
-/// them.
+/// coverage), at most 256 or 65,536 of them in a stream fed 8- or 16-bit integer data (a
+/// histogram of 2 or 512 KiB counts the rest), outside `zonal_stats`' shared budget: feed streams
+/// one at a time to bound them.
 ///
 /// ```no_run
 /// use terrio::ops::rasterize::Grid;
@@ -769,7 +773,7 @@ impl ZonalReducer {
     /// A reduction of one band over [`ZonalReducer::windows`]; pixels equal to `nodata`, or not
     /// finite, are left out.
     pub fn stream(&self, nodata: Option<f64>) -> ZonalStream {
-        ZonalStream { next: 0, state: reduce::StreamState::new(vec![nodata], &self.inner.plan()), reducer: self.inner.clone() }
+        ZonalStream { next: 0, state: reduce::StreamState::new(vec![nodata], &self.inner.plan(), None), reducer: self.inner.clone() }
     }
 }
 
