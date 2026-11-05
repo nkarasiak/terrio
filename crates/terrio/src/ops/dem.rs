@@ -976,8 +976,10 @@ struct Kernel<F, M, R> {
     /// Horn hillshade of square pixels on x86-64).
     multi: Option<M>,
     /// Computes columns `1..width - 1` of a row from the rows above, at and below it, and whether
-    /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give;
-    /// `process` then recomputes the windows holding nodata.
+    /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give,
+    /// except the default Horn hillshade of square pixels, whose unchecked rows give GDAL's SSE
+    /// values on x86-64 ([`HillshadeParams::same_res_row`]); `process` then recomputes the windows
+    /// holding nodata.
     row: Option<R>,
 }
 
