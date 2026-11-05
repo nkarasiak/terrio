@@ -370,7 +370,10 @@ impl PyZonalStream {
     fn add(&self, py: Python<'_>, window: usize, array: &Bound<'_, numpy::PyUntypedArray>) -> PyResult<()> {
         let mut guard = self.lock()?;
         let stream = guard.as_mut().ok_or_else(|| crate::invalid("the stream is finished"))?;
-        if let Some(&terrio::Window { width: w, height: h, .. }) = self.reducer.windows().get(window) {
+        // The shape of the window expected next; the stream reports a window out of order.
+        if window == stream.next_window()
+            && let Some(&terrio::Window { width: w, height: h, .. }) = self.reducer.windows().get(window)
+        {
             let shape = array.shape();
             if shape != [h, w] {
                 let got = shape.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");

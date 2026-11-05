@@ -728,7 +728,7 @@ impl ZonalReducer {
             return Err(Error::InvalidArgument("fractional coverage and all_touched are mutually exclusive".into()));
         }
         if options.stats.iter().any(|s| s.uses_weights()) {
-            return Err(Error::InvalidArgument("weighted statistics need zonal_stats with a weighting raster".into()));
+            return Err(Error::InvalidArgument("weighted statistics need a weighting raster, which ZonalReducer does not take".into()));
         }
         if options.stats.is_empty() {
             return Err(Error::InvalidArgument("zonal statistics needs at least one statistic".into()));
@@ -775,7 +775,19 @@ pub struct ZonalStream {
     state: reduce::StreamState,
 }
 
+/// Prints the stream's progress, not the values it holds.
+impl std::fmt::Debug for ZonalStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZonalStream").field("next_window", &self.next).field("windows", &self.reducer.windows.len()).finish_non_exhaustive()
+    }
+}
+
 impl ZonalStream {
+    /// The window [`add`](Self::add) takes next: the number of windows added.
+    pub fn next_window(&self) -> usize {
+        self.next
+    }
+
     /// Adds the pixels of window `window` (row-major, `width * height` of them, of any sample
     /// type). Windows must come in order: 0, 1, 2, ...
     ///

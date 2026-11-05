@@ -895,6 +895,8 @@ fn zonal_reducer_rejects_out_of_order() {
     assert!(e.to_string().contains("pixels"), "{e}");
     let mut stream = reducer.stream(Some(0.));
     stream.add(0, &data(0)).unwrap();
+    assert_eq!(stream.next_window(), 1);
+    assert_eq!(format!("{stream:?}"), "ZonalStream { next_window: 1, windows: 3, .. }");
     let e = stream.finish().err().unwrap();
     assert!(e.to_string().contains("missing windows"), "{e}");
     let mut stream = reducer.stream(Some(0.));
@@ -910,7 +912,7 @@ fn zonal_reducer_rejects_weighted() {
     let (ds, _, l) = reducer_fixture();
     let o = ZonalOptions { stats: vec![S::WeightedMean], ..Default::default() };
     let e = terrio::ops::zonal::ZonalReducer::new(&l, Grid::like(&ds), &o, None).err().unwrap();
-    assert!(e.to_string().contains("weighted statistics need zonal_stats"), "{e}");
+    assert!(e.to_string().contains("weighted statistics need a weighting raster"), "{e}");
 }
 
 #[test]
@@ -933,4 +935,11 @@ fn zonal_reducer_rejects_bad_grids_and_empty_stats() {
     assert!(new(Grid::like(&ds), vec![]).contains("at least one statistic"));
     let zero = ZonalReducer::new(&l, Grid::like(&ds), &ZonalOptions::default(), Some(0)).err().unwrap();
     assert!(zero.to_string().contains("strip_rows must be at least 1"), "{zero}");
+    // The zones have a CRS and the grid has none, or the other way round.
+    let mut bare = l.clone();
+    bare.set_crs_epsg(None);
+    for (zones, grid) in [(&l, grid(&|g| g.crs = Default::default())), (&bare, Grid::like(&ds))] {
+        let e = ZonalReducer::new(zones, grid, &ZonalOptions::default(), None).err().unwrap();
+        assert!(matches!(e, terrio::Error::Crs(_)) && e.to_string().contains("both declare a CRS"), "{e}");
+    }
 }
