@@ -125,8 +125,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         bottom_up: false,
     };
     let data = path.with_extension("rst");
-    common::clear_header(path.with_extension("rdc"))?;
-    common::write_replacing(&data, common::encode(&r, &layout))?;
+    common::write_headerless(&data, path.with_extension("rdc"), common::encode(&r, &layout))?;
     let crs = super::common::spatial_ref(&r.crs);
     let (refsys, units, pam) = match crs.epsg {
         Some(4326) => ("latlong".to_string(), "deg", false),

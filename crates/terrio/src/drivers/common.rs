@@ -978,13 +978,29 @@ impl std::io::Seek for Rewrite {
 /// Empties the header sidecar at `path`, if there is one, before its headerless data file is
 /// written over: a write interrupted in the data then leaves no header that would open the file as
 /// a raster of old and new bytes. The header is written again after the data.
-pub(crate) fn clear_header(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+fn clear_header(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     match std::fs::OpenOptions::new().write(true).open(path) {
         Ok(f) if f.metadata()?.is_file() => f.set_len(0),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// [`write_replacing`] for a headerless data file at `path` whose header sidecar `header` the
+/// caller writes after it. The data file is opened first, so a write refused there (a read-only
+/// file) leaves both as they were; the header is then emptied ([`clear_header`]) before the data
+/// goes over the old.
+pub(crate) fn write_headerless(
+    path: impl AsRef<std::path::Path>,
+    header: impl AsRef<std::path::Path>,
+    bytes: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = create_replacing(path)?;
+    clear_header(header)?;
+    file.write_all(bytes.as_ref())?;
+    file.finish()
 }
 
 /// [`std::fs::write`] through [`create_replacing`]: `bytes` written over the file at `path`.
@@ -1031,6 +1047,31 @@ mod tests {
         clear_header(&hdr).unwrap();
         assert_eq!(std::fs::metadata(&hdr).unwrap().len(), 0);
         clear_header(dir.path().join("missing.hdr")).unwrap();
+    }
+
+    /// A data file that cannot be opened for writing leaves its header as it was, so the old raster
+    /// still opens; a writable one gets the new data and an emptied header (written again after).
+    #[test]
+    fn a_refused_data_file_keeps_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, hdr) = (dir.path().join("a.bin"), dir.path().join("a.hdr"));
+        std::fs::write(&bin, [1u8; 4]).unwrap();
+        std::fs::write(&hdr, "NROWS 2\nNCOLS 2\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&bin, perms.clone()).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&bin).is_ok() {
+            return; // root, or a file system ignoring permissions: nothing is refused
+        }
+        assert!(write_headerless(&bin, &hdr, [2u8; 4]).is_err());
+        assert_eq!(std::fs::read_to_string(&hdr).unwrap(), "NROWS 2\nNCOLS 2\n");
+        assert_eq!(std::fs::read(&bin).unwrap(), [1u8; 4]);
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        write_headerless(&bin, &hdr, [2u8; 4]).unwrap();
+        assert_eq!(std::fs::read(&bin).unwrap(), [2u8; 4]);
+        assert_eq!(std::fs::metadata(&hdr).unwrap().len(), 0);
     }
 
     /// A device is written over as before, with no truncation to fail on.

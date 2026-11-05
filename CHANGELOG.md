@@ -14,17 +14,17 @@
   `docs/acknowledgements.md`.
 - Raster writers write over an existing file in place, where they truncated it first and waited for
   the kernel to write its old pages back: GeoTIFF and COG (whole, streamed and built from
-  overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, HGT, WebP, GSBG, GeoPackage, netCDF, JPEG 2000, XYZ,
+  overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, HGT, WebP, GSBG, GeoPackage, netCDF, JPEG 2000,
   PNG, JPEG and RST, with their `.hdr`, ENVI and ERS headers, `.sgrd`, `.rdc` and `.wld` files
-  (`.prj` and `.aux.xml` sidecars, GRIB2, MBTiles, PMTiles and Zarr are still truncated). The file
+  (`.prj` and `.aux.xml` sidecars, XYZ, GRIB2, MBTiles, PMTiles and Zarr are still truncated). The file
   stays the same file: a symlink is written through, it keeps its permissions, and its hard links
   and readers holding it open see the new content; a shorter output drops the old tail. The file's
   first 16 bytes, where formats with a signature put it, are zeroed at once and written last, and
   the header of a headerless data file (EHdr, ENVI, ERS, SAGA, RST) is emptied before the data is
   written, so a write interrupted partway (the process killed, the disk full) leaves no such file
   that opens as a raster of old and new bytes (HGT, recognised by its size, can be left so), and one
-  that fails with an error leaves it empty; one that fails while encoding, before the file is
-  opened, leaves it as it was, and a sidecar failing after its data file is finished leaves the new
+  that fails with an error leaves it empty; one that fails while encoding, or on a data file it
+  cannot open, leaves it as it was, and a sidecar failing after its data file is finished leaves the new
   data. A path that is not a regular file (a device such as `/dev/null`, a FIFO) is written as
   before, without truncation. Rewriting a 170 MB GeoTIFF eight times takes a steady 0.22 s each,
   where truncating took 0.07 to 0.8 s with stalls; a 170 MB Float32 raster written eight times over

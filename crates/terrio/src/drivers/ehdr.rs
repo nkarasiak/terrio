@@ -158,8 +158,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         offset: 0,
         bottom_up: false,
     };
-    common::clear_header(path.with_extension("hdr"))?;
-    common::write_replacing(path, common::encode(r, &layout))?;
+    common::write_headerless(path, path.with_extension("hdr"), common::encode(r, &layout))?;
     let pixel_type = match r.data_type {
         DataType::F32 => "FLOAT",
         DataType::I8 | DataType::I16 | DataType::I32 => "SIGNEDINT",
