@@ -132,6 +132,11 @@ def _pixel_geometry(geom: dict[str, Any], inv: Affine) -> dict[str, Any]:
     return out
 
 
+def _north_up(transform: Affine) -> bool:
+    """Whether terrio can burn on `transform` itself (else, in pixel space)."""
+    return transform.b == 0 and transform.d == 0 and transform.a > 0 and transform.e < 0
+
+
 def _burn(
     geoms: list[dict[str, Any]],
     values: list[Any],
@@ -156,8 +161,7 @@ def _burn(
         numpy.ndarray: The burnt values, float64 (for `add`) or of type `ot`.
     """
     h, w = shape
-    north_up = transform.b == 0 and transform.d == 0 and transform.a > 0 and transform.e < 0
-    if north_up:
+    if _north_up(transform):
         # Map coordinates on the exact grid of the transform.
         grid = transform.to_gdal()
         feats = [
@@ -354,7 +358,8 @@ def geometry_mask(
     """A mask of geometries.
 
     Args:
-        geometries: GeoJSON-like geometries.
+        geometries: GeoJSON-like geometries, or a terrio `Layer` in the grid's CRS, which burns
+            without a round trip through GeoJSON.
         out_shape: The mask's shape `(rows, cols)`.
         transform: The grid's transform.
         all_touched: Include every pixel a geometry touches.
@@ -362,7 +367,23 @@ def geometry_mask(
 
     Returns:
         numpy.ndarray: The boolean mask.
+
+    Raises:
+        ValueError: If the shape is empty.
     """
+    if isinstance(geometries, _terrio.Layer):
+        transform = guard_transform(transform)
+        if not _north_up(transform):
+            geometries = [f["geometry"] for f in geometries.to_geojson()["features"]]
+        elif min(out_shape) == 0:
+            raise ValueError("width and height must be > 0")
+        else:
+            like = _terrio.Raster.from_array(np.zeros(out_shape, np.uint8), transform.to_gdal())
+            burnt = _terrio.rasterize(
+                geometries, like=like, burn=1, init=0, ot="Byte", all_touched=all_touched
+            )
+            inside: np.ndarray = np.asarray(burnt.read(1)) > 0
+            return inside if invert else ~inside
     fill, value = (0, 1) if invert else (1, 0)
     arr = rasterize(
         geometries,
