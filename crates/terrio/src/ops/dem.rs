@@ -930,28 +930,6 @@ fn single<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, WindowFn<T>, RowFn<T>> {
     Kernel { f, multi: None, row: None }
 }
 
-/// The runs `start..end` of nodata values (as `ComputeVal()` tests them) in `row`.
-fn nodata_runs<T: Px>(row: &[T], nd: T, nd_nan: bool) -> Vec<(usize, usize)> {
-    const CHUNK: usize = 64;
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for (c, chunk) in row.chunks(CHUNK).enumerate() {
-        // Most chunks have no nodata: a test without branches, which vectorizes, skips them.
-        if !chunk.iter().fold(false, |a, v| a | v.is_nodata(nd, nd_nan)) {
-            continue;
-        }
-        for (j, v) in chunk.iter().enumerate() {
-            if v.is_nodata(nd, nd_nan) {
-                let j = c * CHUNK + j;
-                match runs.last_mut() {
-                    Some(run) if run.1 == j => run.1 = j + 1,
-                    _ => runs.push((j, j + 1)),
-                }
-            }
-        }
-    }
-    runs
-}
-
 /// The rows of a band a 3×3 algorithm runs over: `src` holds rows `src_rows` of a band of
 /// `width` × `height` pixels, and the algorithm computes rows `out_rows`, which `src_rows` covers
 /// with a row more on each side (where the band has one).
@@ -984,7 +962,9 @@ where
     let line_nd = |r: usize| line_nd[r - s0];
     // For a row kernel, each row's runs of nodata columns `start..end`.
     let nd_runs: Vec<Vec<(usize, usize)>> = match &k.row {
-        Some(_) if has_nd => (0..src_rows.len()).map(|r| nodata_runs(&src[r * w..(r + 1) * w], nd, nd_nan)).collect(),
+        Some(_) if has_nd => {
+            (0..src_rows.len()).map(|r| super::window::dirty_runs(&src[r * w..(r + 1) * w], |v: T| v.is_nodata(nd, nd_nan))).collect()
+        }
         _ => Vec::new(),
     };
     let row = |r: usize| &src[(r - s0) * w..(r - s0 + 1) * w];
@@ -1040,17 +1020,12 @@ where
         if let Some(row) = &k.row {
             row(l1, l2, l3, o, check);
             if check {
-                // The windows with nodata: those within a column of a nodata run of the three rows.
-                let mut runs: Vec<(usize, usize)> = [i - 1, i, i + 1].iter().flat_map(|&r| nd_runs[r - s0].iter().copied()).collect();
-                runs.sort_unstable();
-                let mut done = 1; // The columns below `done` are recomputed.
-                for (start, end) in runs {
-                    let to = (end + 1).min(w - 1);
-                    let from = start.saturating_sub(1).max(done);
-                    for (j, v) in o.iter_mut().enumerate().take(to).skip(from) {
+                // The windows with nodata, from the nodata runs of the three rows.
+                let runs = [i - 1, i, i + 1].map(|r| &nd_runs[r - s0][..]);
+                for (from, to) in super::window::dirty_windows(runs, 1, w) {
+                    for (j, v) in o.iter_mut().enumerate().take(to.min(w - 1)).skip(from.max(1)) {
                         *v = compute(win_at(j), true);
                     }
-                    done = done.max(to);
                 }
             }
             j = w.saturating_sub(1).max(1);
