@@ -445,6 +445,7 @@ pub fn zonal_stats_with(
     if options.stats.iter().any(|s| s.uses_weights()) && options.weights.is_none() {
         return Err(Error::InvalidArgument("weighted statistics require a weighting raster".into()));
     }
+    check_stats_and_zones(&options.stats, zones)?;
     let weights = options.weights.as_ref().filter(|_| options.stats.iter().any(|s| s.uses_weights()));
     let weight_header = match weights {
         Some(w) => {
@@ -458,7 +459,6 @@ pub fn zonal_stats_with(
     if sources.iter().all(|s| s.bands.is_empty()) || options.stats.is_empty() {
         return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
     }
-    check_stats_and_zones(&options.stats, zones)?;
     let mut grids: Vec<(index::GridKey, Option<index::ZoneIndex>)> = Vec::new();
     // The grid of each source; none for a source without bands, which is not read.
     let mut source_grid: Vec<Option<usize>> = Vec::new();
@@ -675,6 +675,28 @@ pub struct ReducerGrid {
 /// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
 /// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
 /// coverage), outside `zonal_stats`' shared budget: feed streams one at a time to bound them.
+///
+/// ```no_run
+/// use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+/// use terrio::{crs::SpatialRef, raster::RasterData};
+///
+/// let zones = terrio::open_vector("fields.gpkg", &Default::default())?;
+/// let grid = ReducerGrid {
+///     cols: 10980,
+///     rows: 10980,
+///     geo_transform: [600000.0, 10.0, 0.0, 5000040.0, 0.0, -10.0],
+///     crs: SpatialRef::parse("EPSG:32631")?,
+/// };
+/// let options = ZonalOptions { stats: vec![Statistic::Mean, Statistic::Median], ..Default::default() };
+/// let reducer = ZonalReducer::new(&zones.layers[0], grid, &options, None)?;
+/// let mut stream = reducer.stream(None);
+/// for (i, w) in reducer.windows().iter().enumerate() {
+///     let ndvi = vec![0.5f64; w.width * w.height]; // your values for window `w`
+///     stream.add(i, &RasterData::F64(ndvi))?;
+/// }
+/// let columns = stream.finish()?; // [statistic][feature]
+/// # Ok::<(), terrio::Error>(())
+/// ```
 #[derive(Debug, Clone)]
 pub struct ZonalReducer {
     inner: Arc<Reducer>,
@@ -701,6 +723,12 @@ impl ZonalReducer {
     /// terrio's strip size for one f64 band of this width) that hold zone pixels, each over the
     /// rows and columns of those pixels. Weighted statistics are not supported, nor are `dst_srs`
     /// and `decimal_places` used.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for no statistics, a weighted statistic, `fractional` with
+    /// `all_touched`, `strip_rows` of 0, a quantile outside 0-100, a grid without pixels or with a
+    /// non-finite or non-invertible geotransform, or zones whose CRS differs from the grid's.
     pub fn new(zones: &Layer, grid: ReducerGrid, options: &ZonalOptions, strip_rows: Option<usize>) -> Result<Self> {
         if options.fractional && options.all_touched {
             return Err(Error::InvalidArgument("fractional coverage and all_touched are mutually exclusive".into()));
@@ -709,7 +737,7 @@ impl ZonalReducer {
             return Err(Error::InvalidArgument("weighted statistics need zonal_stats with a weighting raster".into()));
         }
         if options.stats.is_empty() {
-            return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
+            return Err(Error::InvalidArgument("zonal statistics needs at least one statistic".into()));
         }
         if strip_rows == Some(0) {
             return Err(Error::InvalidArgument("strip_rows must be at least 1".into()));
@@ -757,9 +785,11 @@ impl ZonalStream {
     /// Adds the pixels of window `window` (row-major, `width * height` of them, of any sample
     /// type). Windows must come in order: 0, 1, 2, ...
     ///
-    /// After an error the stream is in an undefined state (a failed `add_strip` leaves `next`
-    /// unadvanced and may have partly accumulated the window; likewise a panic caught by the
-    /// caller): do not retry, drop the stream.
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a window out of order or past the last, or data of the
+    /// wrong length. These are checked before any pixel is added, so the stream is unchanged and
+    /// can take the right window. After a panic caught by the caller, drop the stream.
     pub fn add(&mut self, window: usize, data: &RasterData) -> Result<()> {
         if window != self.next {
             return Err(Error::InvalidArgument(format!("zonal stream: got window {window}, expected window {}", self.next)));
@@ -784,7 +814,11 @@ impl ZonalStream {
         Ok(())
     }
 
-    /// `[statistic][feature]`, features in layer order; an error if windows are missing.
+    /// `[statistic][feature]`, features in layer order.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if windows are missing.
     pub fn finish(self) -> Result<Vec<Vec<FieldValue>>> {
         Ok(self.state.finish(&self.reducer.index)?.swap_remove(0))
     }

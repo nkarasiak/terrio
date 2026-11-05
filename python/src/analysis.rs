@@ -266,7 +266,7 @@ fn zonal_stats(
 #[pyclass(module = "terrio", name = "ZonalReducer", frozen)]
 pub struct PyZonalReducer {
     inner: terrio::ops::zonal::ZonalReducer,
-    /// Each statistic's name as given, and whether it is an integer column.
+    /// Each statistic's canonical name, and whether it is an integer column.
     stats: Vec<(String, bool)>,
 }
 

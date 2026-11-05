@@ -64,11 +64,15 @@ impl<'a> Plan<'a> {
 /// zone pixels, over the rows and columns of the pixels in it. Strips without zone pixels, such
 /// as those between the parts of a multipolygon, are left out.
 pub(super) fn strip_windows(index: &ZoneIndex, rows: usize, strip_rows: usize) -> Vec<Window> {
-    // Per strip: (first row, end row, first column, end column) of its zone pixels.
-    let mut extents: Vec<Option<(usize, usize, usize, usize)>> = vec![None; rows.div_ceil(strip_rows)];
+    // Per strip from the zones' first to their last, not per strip of the grid: a grid can be far
+    // taller than its zones. (first row, end row, first column, end column) of its zone pixels.
+    // Spans are in row-major order within a zone.
+    let first = index.zones.iter().filter_map(|z| z.spans.first()).map(|s| s.row as usize).min().unwrap_or(0) / strip_rows;
+    let last = index.zones.iter().filter_map(|z| z.spans.last()).map(|s| s.row as usize + 1).max().unwrap_or(0).min(rows);
+    let mut extents: Vec<Option<(usize, usize, usize, usize)>> = vec![None; last.div_ceil(strip_rows).saturating_sub(first)];
     for span in index.zones.iter().flat_map(|z| &z.spans) {
         let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
-        let e = extents[row / strip_rows].get_or_insert((row, row + 1, col, end));
+        let e = extents[row / strip_rows - first].get_or_insert((row, row + 1, col, end));
         *e = (e.0.min(row), e.1.max(row + 1), e.2.min(col), e.3.max(end));
     }
     extents.into_iter().flatten().map(|(r0, r1, c0, c1)| Window::new(c0, r0, c1 - c0, r1 - r0)).collect()
@@ -549,6 +553,9 @@ mod tests {
             [Window::new(5, 0, 3, 10), Window::new(1, 300, 2, 10), Window::new(9, 1500, 31, 10), Window::new(0, 1599, 1, 1)]
         );
         assert!(strip_windows(&ZoneIndex { zones: vec![] }, 1600, 256).is_empty());
+        // A grid far taller than its zones: strips are counted over the zones' rows only.
+        let index = ZoneIndex { zones: vec![zone(block(7, 3, 2, 4).collect())] };
+        assert_eq!(strip_windows(&index, usize::MAX / 2, 1), [Window::new(2, 7, 4, 1), Window::new(2, 8, 4, 1), Window::new(2, 9, 4, 1)]);
     }
 
     #[test]

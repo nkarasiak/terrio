@@ -517,6 +517,21 @@ fn fractional_geometry_errors_identify_the_source_zone() {
 }
 
 #[test]
+fn statistic_errors_come_before_the_weights_raster_is_read() {
+    use terrio::ops::zonal::ZonalWeight;
+    let r = raster(2, 1, 1, &[1., 1.], None);
+    let l = zones(vec![Some(rectangle(0., 0., 2., 1.))]);
+    // Band 2 of a one-band weights raster is an error too, found only once its header is read.
+    let o = ZonalOptions {
+        stats: vec![S::WeightedSum, S::Quantile(150.)],
+        weights: Some(ZonalWeight::new(raster(2, 1, 1, &[1., 1.], None).into(), 2)),
+        ..Default::default()
+    };
+    let error = zonal_stats(&l, &mut [src("v", &r, 1)], &o).unwrap_err().to_string();
+    assert!(error.contains("quantile percentage 150"), "{error}");
+}
+
+#[test]
 fn only_requested_weighted_statistics_control_validation() {
     use terrio::ops::zonal::ZonalWeight;
     let r = raster(2, 1, 1, &[1e200, -1e200], None);
@@ -821,13 +836,13 @@ fn reduce_arrays(l: &Layer, ds: &RasterDataset, pixels: &[u16], o: &ZonalOptions
     stream.finish().unwrap()
 }
 
-fn modes() -> [ZonalOptions; 3] {
+fn pixel_inclusion_modes() -> [ZonalOptions; 3] {
     let o = ZonalOptions { stats: reducer_stats(), ..Default::default() };
     [o.clone(), ZonalOptions { all_touched: true, ..o.clone() }, ZonalOptions { fractional: true, ..o }]
 }
 
 /// `zonal_stats` of `l` on `ds`, as `[statistic][feature]`.
-fn table(l: &Layer, ds: &RasterDataset, o: &ZonalOptions) -> Vec<Vec<V>> {
+fn zonal_stats_table(l: &Layer, ds: &RasterDataset, o: &ZonalOptions) -> Vec<Vec<V>> {
     let out = zonal_stats(l, &mut [src("v", ds, 1)], o).unwrap();
     o.stats.iter().map(|s| (0..l.len()).map(|f| field(&out, f, &format!("v_{}", s.name())).clone()).collect()).collect()
 }
@@ -835,8 +850,8 @@ fn table(l: &Layer, ds: &RasterDataset, o: &ZonalOptions) -> Vec<Vec<V>> {
 #[test]
 fn zonal_reducer_matches_zonal_stats() {
     let (ds, pixels, l) = reducer_fixture();
-    for o in modes() {
-        let expected = table(&l, &ds, &o);
+    for o in pixel_inclusion_modes() {
+        let expected = zonal_stats_table(&l, &ds, &o);
         assert!(expected[0][..4].iter().all(|c| c != &V::Integer(0) && c != &V::Float(0.)), "{:?}", expected[0]);
         assert_eq!(reduce_arrays(&l, &ds, &pixels, &o), expected, "all_touched {} fractional {}", o.all_touched, o.fractional);
     }
@@ -846,8 +861,8 @@ fn zonal_reducer_matches_zonal_stats() {
 fn zonal_reducer_zones_in_other_crs() {
     let (ds, pixels, l) = reducer_fixture();
     let l = terrio::vector::reproject_layer(&l, &terrio::crs::SpatialRef::from_epsg(4326).unwrap()).unwrap();
-    for o in modes() {
-        assert_eq!(reduce_arrays(&l, &ds, &pixels, &o), table(&l, &ds, &o));
+    for o in pixel_inclusion_modes() {
+        assert_eq!(reduce_arrays(&l, &ds, &pixels, &o), zonal_stats_table(&l, &ds, &o));
     }
 }
 
@@ -918,7 +933,7 @@ fn zonal_reducer_rejects_bad_grids_and_empty_stats() {
     for g in [grid(&|g| g.geo_transform[0] = f64::NAN), grid(&|g| g.geo_transform[1] = f64::INFINITY), grid(&|g| g.geo_transform[1] = 0.)] {
         assert!(new(g, vec![S::Count]).contains("finite and invertible"));
     }
-    assert!(new(reducer_grid(&ds), vec![]).contains("at least one raster band and one statistic"));
+    assert!(new(reducer_grid(&ds), vec![]).contains("at least one statistic"));
     let zero = ZonalReducer::new(&l, reducer_grid(&ds), &ZonalOptions::default(), Some(0)).err().unwrap();
     assert!(zero.to_string().contains("strip_rows must be at least 1"), "{zero}");
 }

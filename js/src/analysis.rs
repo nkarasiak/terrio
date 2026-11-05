@@ -325,8 +325,10 @@ impl JsZonalReducer {
             Some(name) => {
                 layers.drain(..).find(|l| &l.name == name).ok_or_else(|| JsError::new(&format!("no zone layer named '{name}'")))?
             }
-            None if layers.len() == 1 => layers.remove(0),
-            None => return Err(JsError::new("the zones have several layers: choose one with the layer option")),
+            None if layers.len() > 1 => {
+                return Err(JsError::new("the zones have several layers: choose one with the layer option"));
+            }
+            None => layers.pop().ok_or_else(|| JsError::new("the zones have no layer"))?,
         };
         let options = ZonalOptions { fractional: a.fractional, stats, all_touched: a.all_touched, ..Default::default() };
         let crs = crs.as_deref().map(terrio::crs::SpatialRef::parse).transpose().map_err(js_err)?.unwrap_or_default();
