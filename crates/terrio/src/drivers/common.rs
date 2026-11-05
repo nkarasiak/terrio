@@ -1047,26 +1047,31 @@ mod tests {
         clear_header(dir.path().join("missing.hdr")).unwrap();
     }
 
-    /// A data file that cannot be opened for writing leaves its header as it was, so the old raster
-    /// still opens; a writable one gets the new data and an emptied header (written again after).
+    /// A data file that cannot be opened for writing, or a header that cannot be emptied, leaves
+    /// both as they were, so the old raster still opens; writable ones get the new data and an
+    /// emptied header (written again after).
     #[test]
-    fn a_refused_data_file_keeps_its_header() {
+    fn a_refused_data_file_or_header_keeps_both() {
         let dir = tempfile::tempdir().unwrap();
         let (bin, hdr) = (dir.path().join("a.bin"), dir.path().join("a.hdr"));
         std::fs::write(&bin, [1u8; 4]).unwrap();
         std::fs::write(&hdr, "NROWS 2\nNCOLS 2\n").unwrap();
-        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&bin, perms.clone()).unwrap();
-        if std::fs::OpenOptions::new().write(true).open(&bin).is_ok() {
-            return; // root, or a file system ignoring permissions: nothing is refused
+        let read_only = |path: &std::path::Path, on: bool| {
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(on);
+            std::fs::set_permissions(path, perms).unwrap();
+        };
+        for refused in [&bin, &hdr] {
+            read_only(refused, true);
+            if std::fs::OpenOptions::new().write(true).open(refused).is_ok() {
+                return; // root, or a file system ignoring permissions: nothing is refused
+            }
+            assert!(write_headerless(&bin, &hdr, [2u8; 4]).is_err());
+            assert_eq!(std::fs::read_to_string(&hdr).unwrap(), "NROWS 2\nNCOLS 2\n");
+            assert_eq!(std::fs::read(&bin).unwrap(), [1u8; 4]);
+            read_only(refused, false);
         }
-        assert!(write_headerless(&bin, &hdr, [2u8; 4]).is_err());
-        assert_eq!(std::fs::read_to_string(&hdr).unwrap(), "NROWS 2\nNCOLS 2\n");
-        assert_eq!(std::fs::read(&bin).unwrap(), [1u8; 4]);
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        std::fs::set_permissions(&bin, perms).unwrap();
         write_headerless(&bin, &hdr, [2u8; 4]).unwrap();
         assert_eq!(std::fs::read(&bin).unwrap(), [2u8; 4]);
         assert_eq!(std::fs::metadata(&hdr).unwrap().len(), 0);
