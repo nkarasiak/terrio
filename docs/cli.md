@@ -2419,10 +2419,10 @@ Repeat `--raster` for multiple rasters (or give `--raster @FILE`, a list of path
 and use `--band` for comma-separated bands from each. `--inputs FILE` reads a CSV table with a
 header: `path` (required), and optional `time`, `label` and `band` (a band number; by default
 each `--band`); quote fields that contain commas (RFC 4180 quoting; a row with more fields than
-the header is an error). Table rows naming the same path share one read, and so do rows naming
-a `--raster` path; a `--raster` given twice is read twice. Over
-MCP, `--inputs` tables and `@FILE` lists are refused: pass each raster as a `--raster` argument
-(labelled rows are not available there).
+the header is an error). Table rows naming the same path share one read, which a `--raster` of
+that path also uses; a `--raster` given twice is read twice. Over MCP, `--inputs` tables and
+`@FILE` lists are refused: pass each raster as a `--raster` argument (labelled rows are not
+available there).
 Default statistics are `count,min,max,mean,sum,stddev`. Also available: `variance`, `cv`
 (standard deviation over mean, null when the mean is 0), `median`, `quantile_P` for a
 percentage P from 0 to 100 (`quantile_25`, `quantile_2.5`), `mode` (alias `majority`: the value
