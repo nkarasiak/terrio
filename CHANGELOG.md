@@ -23,19 +23,20 @@
   0.16 -> 0.09, roughness 0.17 -> 0.09. Outputs are bit-identical to the previous build (144
   products and options on four DEMs: Float32 and Int16, with and without nodata), and slope (with
   and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all 42,260,130 pixels.
-- `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) and VRT
-  `KernelFilteredSource` reads compute rows whole away from the edges: sums, means, minimums,
-  maximums and standard deviations tap after tap across the row (AVX2 where detected at run time),
-  medians from the taps' ranks (up to 49 taps) and modes from running counts (up to 121 taps). Edge
-  pixels and windows holding nodata (or NaN, when a nodata value is set) are recomputed per pixel,
-  and rows of speckled nodata are computed one pixel at a time, so the values are unchanged; the
-  per-pixel median selects instead of sorting, and Float32 bands are no longer copied twice. On a
-  5610 x 7533 DEM, one thread (GDAL 3.12's VRT KernelFilteredSource in parentheses): mean 3x3 1.31
-  -> 0.15 s (1.38), gaussian 5x5 3.05 -> 0.23 s (2.58), u 1.09 -> 0.10 s, max 3x3 1.41 -> 0.15 s
-  (1.21), median 3x3 2.87 -> 1.23 s (5.40), and mode 3x3 on a fifth of that DEM 1.23 -> 0.12 s;
-  medians are faster at every size up to 15x15 and modes up to 11x11 (larger modes keep the
-  per-pixel path). Outputs equal GDAL's VRT for mean, gaussian, u, max and median, with and without
-  nodata, and the previous build's for 20 kernels and methods (40 outputs).
+- `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) computes rows
+  whole away from the edges: sums, means, minimums, maximums and standard deviations tap after tap
+  across the row (AVX2 where detected at run time), medians from the taps' ranks (up to 49 taps) and
+  modes from running counts (up to 121 taps). Edge pixels and windows holding nodata (or NaN, when a
+  nodata value is set) are recomputed per pixel, and rows of speckled nodata are computed one pixel
+  at a time, so the values are unchanged; the per-pixel median selects instead of sorting, and
+  Float32 bands are no longer copied twice. On a 5610 x 7533 DEM, one thread (GDAL 3.12's VRT
+  KernelFilteredSource in parentheses): mean 3x3 1.31 -> 0.15 s (1.38), gaussian 5x5 3.05 -> 0.23 s
+  (2.58), u 1.09 -> 0.10 s, max 3x3 1.41 -> 0.15 s (1.21), median 3x3 2.87 -> 1.23 s (5.40), and
+  mode 3x3 on a fifth of that DEM 1.23 -> 0.12 s; medians are faster at every size up to 15x15 and
+  modes up to 11x11 (larger modes keep the per-pixel path). Outputs equal GDAL's VRT for mean,
+  gaussian, u, max and median, with and without nodata, and the previous build's for 20 kernels and
+  methods (40 outputs). VRT `KernelFilteredSource` reads share this filter, so they also compute
+  rows whole, with the same values.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
