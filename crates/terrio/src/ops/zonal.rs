@@ -665,7 +665,9 @@ fn release_freed_memory() {
 /// zones are computed once for the grid, then each [`ZonalReducer::stream`] reduces one band.
 /// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
 /// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
-/// coverage), outside `zonal_stats`' shared budget: feed streams one at a time to bound them.
+/// coverage), at most 98,304 of them for 8- and 16-bit integer data (a histogram of 768 KiB
+/// counts the rest), outside `zonal_stats`' shared budget: feed streams one at a time to bound
+/// them.
 ///
 /// ```no_run
 /// use terrio::ops::rasterize::Grid;

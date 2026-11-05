@@ -3,16 +3,17 @@
 ## Unreleased
 
 - Zonal statistics that keep values (median, quantiles, mode, minority, variety) count a zone's
-  values of an 8- or 16-bit integer band in a histogram once it has more than 98,304 of them, so
-  a zone keeps at most 768 KiB per band and its values are no longer sorted. Bands of such
-  rasters are then reduced together rather than one per pass: the median of each of 10 UInt16
-  bands over one zone covering a 10980 x 10980 tile takes 6.1 s and 1.07 GB, down from 24.1 s
-  and 2.88 GB (70 s to 12 s of CPU), and 6.7 s and 1.08 GB with `fractional`, down from 39.6 s
-  and 3.83 GB. Results are unchanged, byte for byte on that tile and on 10,000 fields; with
-  `fractional`, a zone counted in a histogram sums equal values' coverages in another order, so
-  its quantiles can differ in the last digits. Smaller zones of such bands are sorted by radix
-  without `fractional`: the median of 10 UInt16 bands over 10,000 fields of about 5,000 pixels
-  takes 26% less CPU (26 s to 19 s on 32 threads) and about 10% less time, with the same output.
+  values of an 8- or 16-bit integer band in a histogram of 768 KiB once it has more than 98,304
+  of them, so a zone keeps at most that many per band and they are no longer sorted; smaller
+  zones of such bands are sorted by radix without `fractional`. Bands of such rasters are then
+  reduced together rather than one per pass. The median of each of 10 UInt16 bands (10980 x 10980,
+  DEFLATE, 32 threads) over one zone covering the tile takes 5.0 s, 11 s of CPU and 1.09 GB,
+  down from 24.1 s, 70 s and 2.88 GB (0.7.0: 47.8 s, 47 s and 5.34 GB); over 10,000 fields of
+  about 5,000 pixels, 2.2 s, 20 s of CPU and 1.0 GB, down from 2.3 s, 25 s and 1.03 GB (0.7.0:
+  18.6 s, 41 s and 2.58 GB). Results are unchanged, byte for byte on both, also with `fractional`
+  and with mode, minority, quantiles and variety; with `fractional`, a zone counted in a
+  histogram sums equal values' coverages in another order, so its quantiles can differ in the
+  last digits.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).

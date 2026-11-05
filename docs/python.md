@@ -604,7 +604,8 @@ strip size for one float64 band of this width; give a tiled source's block heigh
 block once), and `stream()` reduces
 one band fed those strips in order. Statistics that keep values (median, quantiles, mode,
 minority, variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with
-`fractional`): feed streams one at a time to bound them.
+`fractional`), at most 98,304 of them for 8- and 16-bit integer arrays (a histogram of 768 KiB
+counts the rest): feed streams one at a time to bound them.
 
 ```python
 reducer = terrio.ZonalReducer(fields, width, height, transform, "EPSG:32631", stats=["mean", "median"])
