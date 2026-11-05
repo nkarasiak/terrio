@@ -3,26 +3,27 @@
 ## Unreleased
 
 - `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes its 3×3 products a row at a time, 16
-  windows at once (excepted, on rows without nodata: the default hillshade, 4 windows at a time with
-  GDAL's SSE reciprocal square root on x86-64, one at a time elsewhere, as before, and the GDAL 3.13
-  kernel's Horn hillshade of square pixels on x86-64, which keeps GDAL's SSE path), with AVX2 where
-  `is_x86_feature_detected!` finds it at run time and the same code without it on other CPUs and in
-  WebAssembly. Rows holding nodata no longer fall back to one pixel at a time, except in the GDAL
-  3.13 kernel's Horn hillshade of square pixels on x86-64 (its Float32 arithmetic): only the windows
-  around each row's nodata are recomputed with the per-pixel code, and rows of speckled nodata (more
-  than one run per 16 pixels) are computed one pixel at a time, as before. Aspect, and with the
-  default (GDAL 3.12) kernel slope in degrees and the combined and Igor hillshades, take their
-  arctangents from fdlibm (credited in `NOTICE`, `LICENSES/SunPro.txt` and the acknowledgements),
-  and recompute with the platform's functions the few pixels whose result could round differently,
-  so the values do not change. On a 5610 x 7533 Float32 DEM, one thread: slope 1.45 -> 0.27 s; the
-  default hillshade 0.98 -> 0.33 s with its algorithm inlined, and 0.28 -> 0.16 s with rows in a
-  later run; with 2 million nodata pixels / without (s): multidirectional hillshade 0.42 / 0.39 ->
-  0.18 / 0.14, Zevenbergen-Thorne hillshade 0.31 / 0.21 -> 0.15 / 0.12, Igor 1.15 / 1.06 -> 0.44 /
-  0.40, combined 1.06 / 0.78 -> 0.44 / 0.40, aspect 0.69 / 0.66 -> 0.26 / 0.23, Zevenbergen-Thorne
-  slope 0.44 / 0.33 -> 0.20 / 0.16, slope percent 0.23 / 0.20 -> 0.13 / 0.10, TRI 0.22 -> 0.12, TPI
-  0.16 -> 0.09, roughness 0.17 -> 0.09. Outputs are bit-identical to the previous build (144
-  products and options on four DEMs: Float32 and Int16, with and without nodata), and slope (with
-  and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all 42,260,130 pixels.
+  windows at once (excepted, on rows without nodata: the default hillshade of square pixels, 4
+  windows at a time with GDAL's SSE reciprocal square root on x86-64, one at a time elsewhere, as
+  before, and the GDAL 3.13 kernel's Horn hillshade of square pixels on x86-64, which keeps GDAL's
+  SSE path), with AVX2 where `is_x86_feature_detected!` finds it at run time and the same code
+  without it on other CPUs and in WebAssembly. Rows holding nodata no longer fall back to one pixel
+  at a time, except in the GDAL 3.13 kernel's Horn hillshade of square pixels on x86-64 (its Float32
+  arithmetic): only the windows around each row's nodata are recomputed with the per-pixel code, and
+  rows of speckled nodata (more than one run per 16 pixels) are computed one pixel at a time, as
+  before. Aspect, and with the default (GDAL 3.12) kernel slope in degrees and the combined and Igor
+  hillshades, take their arctangents from fdlibm (credited in `NOTICE`, `LICENSES/SunPro.txt` and
+  the acknowledgements), and recompute with the platform's functions the few pixels whose result
+  could round differently, so the values do not change. On a 5610 x 7533 Float32 DEM, one thread:
+  slope 1.45 -> 0.27 s; the default hillshade 0.98 -> 0.33 s with its algorithm inlined, and 0.28 ->
+  0.16 s with rows in a later run; with 2 million nodata pixels / without (s): multidirectional
+  hillshade 0.42 / 0.39 -> 0.18 / 0.14, Zevenbergen-Thorne hillshade 0.31 / 0.21 -> 0.15 / 0.12,
+  Igor 1.15 / 1.06 -> 0.44 / 0.40, combined 1.06 / 0.78 -> 0.44 / 0.40, aspect 0.69 / 0.66 -> 0.26 /
+  0.23, Zevenbergen-Thorne slope 0.44 / 0.33 -> 0.20 / 0.16, slope percent 0.23 / 0.20 -> 0.13 /
+  0.10, TRI 0.22 -> 0.12, TPI 0.16 -> 0.09, roughness 0.17 -> 0.09. Outputs are bit-identical to the
+  previous build (144 products and options on four DEMs: Float32 and Int16, with and without
+  nodata), and slope (with and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all
+  42,260,130 pixels.
 - `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) computes rows
   whole away from the edges: sums, means, minimums, maximums and standard deviations tap after tap
   across the row (AVX2 where detected at run time), medians from the taps' ranks (up to 49 taps) and
