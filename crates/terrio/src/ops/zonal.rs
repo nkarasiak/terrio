@@ -672,7 +672,9 @@ pub struct ReducerGrid {
 /// Zonal statistics of arrays the caller supplies strip by strip (after its own per-pixel
 /// transforms, say), equal to those [`zonal_stats`] gives for a raster holding the same values:
 /// zones are computed once for the grid, then each [`ZonalReducer::stream`] reduces one band.
-/// Cloning shares the zones.
+/// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
+/// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
+/// coverage), outside `zonal_stats`' shared budget: feed streams one at a time to bound them.
 #[derive(Debug, Clone)]
 pub struct ZonalReducer {
     inner: Arc<Reducer>,
@@ -709,13 +711,16 @@ impl ZonalReducer {
         if options.stats.is_empty() {
             return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
         }
+        if strip_rows == Some(0) {
+            return Err(Error::InvalidArgument("strip_rows must be at least 1".into()));
+        }
         check_stats_and_zones(&options.stats, zones)?;
         let ReducerGrid { cols, rows, geo_transform, crs } = grid;
         super::sample::check_grid(&geo_transform, cols, rows)?;
         let index = index::build(zones, &index::GridKey { cols, rows, geo_transform, crs }, options.all_touched, options.fractional)?;
         let fids = zones.features.iter().map(|f| f.fid).collect();
         let strip_rows = strip_rows.unwrap_or_else(|| super::strips::small_strip_rows(cols, 1, std::mem::size_of::<f64>(), None));
-        let windows = reduce::strip_windows(&index, rows, strip_rows.max(1));
+        let windows = reduce::strip_windows(&index, rows, strip_rows);
         Ok(Self { inner: Arc::new(Reducer { index, stats: options.stats.clone(), fractional: options.fractional, fids, windows }) })
     }
 

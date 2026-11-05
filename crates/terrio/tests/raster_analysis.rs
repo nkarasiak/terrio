@@ -919,4 +919,6 @@ fn zonal_reducer_rejects_bad_grids_and_empty_stats() {
         assert!(new(g, vec![S::Count]).contains("finite and invertible"));
     }
     assert!(new(reducer_grid(&ds), vec![]).contains("at least one raster band and one statistic"));
+    let zero = ZonalReducer::new(&l, reducer_grid(&ds), &ZonalOptions::default(), Some(0)).err().unwrap();
+    assert!(zero.to_string().contains("strip_rows must be at least 1"), "{zero}");
 }

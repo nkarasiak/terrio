@@ -600,7 +600,9 @@ can be supplied as `weights=...`, with `weight_band=1`, then select `weighted_me
 time, such as a band index over a scene, without writing them to a raster first. Zones are
 computed once for the grid; `windows()` lists the `(x, y, width, height)` strips that hold zone
 pixels (in strips of `strip_rows` rows, set when the reducer is created), and `stream()` reduces
-one band fed those strips in order:
+one band fed those strips in order. Statistics that keep values (median, quantiles, mode,
+minority, variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with
+`fractional`): feed streams one at a time to bound them.
 
 ```python
 reducer = terrio.ZonalReducer(fields, width, height, transform, "EPSG:32631", stats=["mean", "median"])
