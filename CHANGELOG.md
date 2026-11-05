@@ -7,8 +7,8 @@
   the type has (256 or 65,536), so those values are no longer sorted or held; smaller zones'
   integer values are sorted by radix without `fractional`. Bands of such rasters are then
   reduced together rather than one per pass. The median of each of 10 UInt16 bands (10980 x
-  10980, DEFLATE, 32 threads) over one zone covering the tile takes 5.0 s, 11 s of CPU and
-  1.09 GB, down from 24.1 s, 70 s and 2.88 GB (0.7.0: 47.8 s, 47 s and 5.34 GB); over 10,000
+  10980, DEFLATE, 32 threads) over one zone covering the tile takes 5.3 s, 11.6 s of CPU and
+  1.07 GB, down from 24.1 s, 70 s and 2.88 GB (0.7.0: 47.8 s, 47 s and 5.34 GB); over 10,000
   fields of about 5,000 pixels, 2.2 s, 20 s of CPU and 1.0 GB, down from 2.3 s, 25 s and
   1.03 GB (0.7.0: 18.6 s, 41 s and 2.58 GB). Outputs are byte for byte the same on both, also
   with mode, minority, quantiles, variety and `fractional`. Without `fractional`, results are
