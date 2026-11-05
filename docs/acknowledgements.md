@@ -142,10 +142,10 @@ from it.
 
 ## fdlibm
 
-terrio's vectorized slope (`crates/terrio/src/ops/dem.rs`) computes the arctangent with fdlibm's
-algorithm and constants (`s_atan.c`, copyright 1993 Sun Microsystems), as FreeBSD's msun and the
-Rust [`libm`](https://crates.io/crates/libm) crate have it, falling back to the platform's `atan`
-wherever the two could round differently.
+terrio's vectorized slope, aspect and hillshades (`crates/terrio/src/ops/dem.rs`) compute
+arctangents with fdlibm's algorithms and constants (`s_atan.c` and `e_atan2.c`, copyright 1993 Sun
+Microsystems), as FreeBSD's msun and the Rust [`libm`](https://crates.io/crates/libm) crate have
+them, falling back to the platform's functions wherever the two could round differently.
 
 ## Python APIs
 
