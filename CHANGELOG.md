@@ -10,9 +10,9 @@
   trip. The pool holds one set of settings at a time and is rebuilt when the timeout, connect
   timeout, user agent or proxy variables change, and in a forked child, which never uses or closes
   the parent's connections: clients opened before the fork send their requests in the child
-  through the child's pool, and a fork waits for the pool's lock. Opening a STAC item set of 10 Sentinel-2 dates x 4
-  bands over https on 32 threads took 18.6 s instead of 27.2 s read eagerly, and 6.7 s instead of
-  8.1 s read in chunks (one run each; the network varies between runs).
+  through the child's pool, and a fork waits for the pool's lock. Opening a STAC item set of 10
+  Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s instead of 27.2 s read eagerly,
+  and 6.7 s instead of 8.1 s read in chunks (one run each; the network varies between runs).
 - GeoTIFF: little-endian Deflate tiles and strips of integer samples, with or without the horizontal
   predictor, and of floating-point samples without a predictor (Float16 and YCbCr excepted) are
   decoded by terrio rather than the `tiff` crate: inflated in one call straight into the result with
