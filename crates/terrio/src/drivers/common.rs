@@ -870,13 +870,15 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// bytes. Headerless data files rely on their header sidecar instead ([`write_headerless`]).
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
     let meta = file.metadata()?;
     let regular = meta.is_file();
+    let mut rewrite = Rewrite { file, regular, finished: false, head: [0; HEAD], head_len: 0, pos: 0, synced: false };
     if regular && meta.len() > 0 {
-        file.write_all(&[0; HEAD][..HEAD.min(meta.len() as usize)])?;
+        // Dropped on a failure here, the rewrite empties the file, as for any failed write.
+        rewrite.file.write_all(&[0; HEAD][..HEAD.min(meta.len() as usize)])?;
     }
-    Ok(Rewrite { file, regular, finished: false, head: [0; HEAD], head_len: 0, pos: 0, synced: false })
+    Ok(rewrite)
 }
 
 /// The leading bytes [`Rewrite`] holds back until [`Rewrite::finish`].
