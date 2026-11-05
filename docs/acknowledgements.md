@@ -140,6 +140,13 @@ published [`FeatureCollection.proto`](https://github.com/Esri/arcgis-pbf), copyr
 the Apache License 2.0. It follows the message and field numbers that file defines; no code is copied
 from it.
 
+## fdlibm
+
+terrio's vectorized slope (`crates/terrio/src/ops/dem.rs`) computes the arctangent with fdlibm's
+algorithm and constants (`s_atan.c`, copyright 1993 Sun Microsystems), as FreeBSD's msun and the
+Rust [`libm`](https://crates.io/crates/libm) crate have it, falling back to the platform's `atan`
+wherever the two could round differently.
+
 ## Python APIs
 
 terrio's Python package borrows its shape from [rasterio](https://rasterio.readthedocs.io),
