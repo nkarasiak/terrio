@@ -77,9 +77,10 @@ fn zone_strips(index: &ZoneIndex, strip_rows: usize) -> Option<(usize, usize, us
 /// as those between the parts of a multipolygon, are left out.
 pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window> {
     let window = |(r0, r1, c0, c1): (usize, usize, usize, usize)| Window::new(c0, r0, c1 - c0, r1 - r0);
-    // A slot per strip, when there are fewer strips than (zone, strip) pairs: the first row, end
-    // row, first column and end column of its zone pixels.
-    if let Some((first, last, crossed)) = zone_strips(index, strip_rows)
+    // A slot per strip, when there are no more strips than (zone, strip) pairs (40 bytes each):
+    // the first row, end row, first column and end column of its zone pixels.
+    let strips = zone_strips(index, strip_rows);
+    if let Some((first, last, crossed)) = strips
         && last - first < crossed
     {
         let mut slots: Vec<Option<(usize, usize, usize, usize)>> = vec![None; last - first + 1];
@@ -92,7 +93,7 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
     }
     // Else (strip, first row, end row, first column, end column) per (zone, strip) pair, merged by
     // strip.
-    let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::with_capacity(strips.map_or(0, |(_, _, crossed)| crossed));
     for zone in &index.zones {
         let zone_parts = parts.len();
         for span in &zone.spans {
@@ -119,43 +120,41 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
     let strip_rows = strip_rows.max(1);
     let pixels = |zone: &Zone| zone.spans.iter().map(|s| i64::from(s.len)).sum::<i64>();
-    // The change in open pixels at each strip where it changes, in order.
-    let changes: Vec<i64> = match zone_strips(index, strip_rows) {
-        // A slot per strip (8 bytes), when that takes less room than two pairs per zone and their
-        // sums (up to 48 bytes a zone).
-        Some((first, last, _)) if last - first < 6 * index.zones.len() => {
+    // The most open pixels, from the change in open pixels at each strip where it changes.
+    let peak = |changes: &mut dyn Iterator<Item = i64>| {
+        let mut open = 0i64;
+        changes
+            .map(|c| {
+                open += c;
+                open
+            })
+            .max()
+            .unwrap_or(0)
+            .max(0) as usize
+    };
+    match zone_strips(index, strip_rows) {
+        // A slot per strip (8 bytes), when the slots take no more room than two (strip, change)
+        // pairs per zone (32 bytes a zone).
+        Some((first, last, _)) if last - first + 2 <= 4 * index.zones.len() => {
             let mut change = vec![0i64; last - first + 2];
             for zone in &index.zones {
                 let pixels = pixels(zone);
                 change[zone.row_start / strip_rows - first] += pixels;
                 change[(zone.row_end - 1) / strip_rows + 1 - first] -= pixels;
             }
-            change
+            peak(&mut change.into_iter())
         }
-        // Else two (strip, change) pairs per zone, summed by strip.
+        // Else the pairs, sorted and summed by strip.
         _ => {
-            let mut pairs: Vec<(usize, i64)> = index
-                .zones
-                .iter()
-                .flat_map(|zone| {
-                    let pixels = pixels(zone);
-                    [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
-                })
-                .collect();
+            let mut pairs: Vec<(usize, i64)> = Vec::with_capacity(2 * index.zones.len());
+            for zone in &index.zones {
+                let pixels = pixels(zone);
+                pairs.extend([(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]);
+            }
             pairs.sort_unstable_by_key(|c| c.0);
-            pairs.chunk_by(|a, b| a.0 == b.0).map(|strip| strip.iter().map(|c| c.1).sum()).collect()
+            peak(&mut pairs.chunk_by(|a, b| a.0 == b.0).map(|strip| strip.iter().map(|c| c.1).sum()))
         }
-    };
-    let mut open = 0i64;
-    changes
-        .iter()
-        .map(|c| {
-            open += c;
-            open
-        })
-        .max()
-        .unwrap_or(0)
-        .max(0) as usize
+    }
 }
 
 /// Statistics of each band (in `bands` order) for each statistic (in plan order) and feature
