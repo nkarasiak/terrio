@@ -575,11 +575,12 @@ pub fn zonal_stats_with(
         let mut weight_raster = weights.map(|w| w.lock().map(|mut r| r.shared())).transpose()?;
         let zone_index = grids[grid].1.as_ref().expect("built above");
         // Statistics that keep values hold every open zone's values for each band reduced at once:
-        // of an 8- or 16-bit band, at most `values_per_zone`, a histogram of as many bins counting
-        // those of a larger zone. Bands are reduced in groups whose values take at most
-        // `VALUES_PER_PASS` (one band at a time when one band's take more), so that a zone covering
-        // a whole multi-band float raster holds one band's values, as 0.7.0 did. Each further pass
-        // reads the raster again. Passes of all sources share the budget (`hold_values`).
+        // of an 8- or 16-bit band, at most `values_per_zone`, a zone of at least as many pixels
+        // counting them in a histogram of as many bins. Bands are reduced in groups whose values
+        // take at most `VALUES_PER_PASS` (one band at a time when one band's take more), so that a
+        // zone covering a whole multi-band float raster holds one band's values, as 0.7.0 did. Each
+        // further pass reads the raster again. Passes of all sources share the budget
+        // (`hold_values`).
         // Values per band at the strip height of a pass of `n` bands (strips of fewer bands are
         // taller); the largest group that fits, or one band.
         let per_band = |n: usize| match plan.value_bytes_per_pixel() {

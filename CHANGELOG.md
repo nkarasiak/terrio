@@ -4,8 +4,9 @@
 
 - Zonal statistics that keep values (median, quantiles, mode, minority, variety) count the values of
   a zone of an 8- or 16-bit integer band with at least as many pixels as the type has values (256 or
-  65,536) in a histogram (2 or 512 KiB), so those values are no longer sorted or held. Without
-  `fractional`, a zone whose listed values, 256 or more, are all integers of such types (but -0),
+  65,536) in a histogram (2 or 512 KiB) rather than holding and sorting them; values it does not
+  count (-0, fractions, values outside the type's range) are still listed. Without `fractional`, a
+  zone whose listed values, 256 or more, are all integers from -32,768 to 65,535 (other than -0),
   whatever the band's type, is sorted by radix. The bands of 8- and 16-bit rasters are then usually
   reduced together rather than one per pass. The median of each of 10 UInt16 bands (10980 x 10980,
   DEFLATE, 32 threads) over one zone covering the tile takes 4.9 s, 10.7 s of CPU and 1.06 GB, down

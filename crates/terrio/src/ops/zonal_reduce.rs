@@ -96,7 +96,8 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
 /// The most pixels of the zones open at once while strips of `strip_rows` rows are reduced: what
 /// each band's value lists hold at their peak, as `reduce_source` opens a zone at the strip of its
 /// first row and finishes it after the strip of its last. A zone counts at most `per_zone` pixels
-/// ([`values_per_zone`]): one of more counts its values in a histogram of `per_zone` bins.
+/// ([`values_per_zone`]): a zone of at least `per_zone` pixels counts its values in a histogram of
+/// `per_zone` bins.
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: usize) -> usize {
     let strip_rows = strip_rows.max(1);
     // (strip, change in open pixels): two per zone, so memory follows the zones, not the grid.
@@ -201,7 +202,7 @@ impl StreamState {
         let r1 = r0 + height;
         let bands = self.nodata.len();
         while self.next < zones.len() && zones[self.next].row_start < r1 {
-            let pixels = zones[self.next].spans.iter().map(|s| s.len as usize).sum();
+            let pixels = if plan.keep_values { zones[self.next].spans.iter().map(|s| s.len as usize).sum() } else { 0 };
             let data_type = self.data_type.unwrap_or(strip.data_type);
             self.open.push((self.next, 0, (0..bands).map(|_| Accumulator::new(plan, pixels, data_type)).collect()));
             self.next += 1;
@@ -261,7 +262,7 @@ impl StreamState {
                     .iter_mut()
                     .map(|acc| {
                         let bins = if plan.keep_values { acc.bins(plan.fractional) } else { Vec::new() };
-                        let ranks = if plan.ranks { ranks(&bins) } else { Vec::new() };
+                        let ranks = if plan.ranks { cumulative(&bins) } else { Vec::new() };
                         plan.stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect::<Vec<_>>()
                     })
                     .collect();
@@ -360,7 +361,7 @@ struct Histogram {
 
 /// The integers a histogram counts for a band of `data_type`, every value of an 8- or 16-bit
 /// integer type: the first and how many.
-pub(super) fn histogram_range(data_type: DataType) -> Option<(f64, usize)> {
+fn histogram_range(data_type: DataType) -> Option<(f64, usize)> {
     match data_type {
         DataType::U8 => Some((0.0, 256)),
         DataType::I8 => Some((-128.0, 256)),
@@ -370,8 +371,8 @@ pub(super) fn histogram_range(data_type: DataType) -> Option<(f64, usize)> {
     }
 }
 
-/// The most values an accumulator lists for a zone of a band of `data_type`: a zone of more counts
-/// them in a histogram ([`histogram_range`]).
+/// The most values an accumulator lists for a zone of a band of `data_type`: a zone of at least as
+/// many pixels counts them in a histogram ([`histogram_range`]).
 pub(super) fn values_per_zone(data_type: DataType) -> usize {
     histogram_range(data_type).map_or(usize::MAX, |r| r.1)
 }
@@ -392,8 +393,9 @@ const RADIX_KEYS: usize = 98_304;
 
 /// `values` as `(value, count)` bins of identical values (-0 apart from 0) in `total_cmp` order.
 fn counts(mut values: Vec<f64>) -> Vec<(f64, f64)> {
-    // Integers of 8- or 16-bit types, as 17-bit keys sorted by radix: faster than comparing, but
-    // for a few values, which its fixed passes over 512 digits would outweigh.
+    // Integers from RADIX_FIRST (-32,768 to 65,535, every value of an 8- or 16-bit type), whatever
+    // the band's type, as 17-bit keys sorted by radix: faster than comparing, but for a few values,
+    // which its fixed passes over 512 digits would outweigh.
     if values.len() >= 256 && values.iter().all(|&v| bin(v, RADIX_FIRST, RADIX_KEYS).is_some()) {
         let mut keys: Vec<u32> = values.iter().map(|&v| (v - RADIX_FIRST) as u32).collect();
         drop(values);
@@ -632,7 +634,7 @@ impl Summary {
 }
 
 /// The cumulative weights of `bins`: in binary mode, the rank after each bin's last value.
-fn ranks(bins: &[(f64, f64)]) -> Vec<f64> {
+fn cumulative(bins: &[(f64, f64)]) -> Vec<f64> {
     bins.iter()
         .scan(0.0, |n, b| {
             *n += b.1;
@@ -749,7 +751,7 @@ mod tests {
     /// The statistics of `acc` as a finished zone computes them.
     fn finish(acc: &mut super::Accumulator, plan: &Plan<'_>, stats: &[Statistic], fractional: bool) -> Vec<crate::FieldValue> {
         let bins = acc.bins(fractional);
-        let ranks = super::ranks(&bins);
+        let ranks = super::cumulative(&bins);
         stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect()
     }
 
@@ -817,13 +819,16 @@ mod tests {
             Geometry::polygon(ring(0., 0., cols as f64, rows as f64), vec![]),
             Geometry::polygon(ring(3.3, 2.7, 390.6, 290.2), vec![ring(50.5, 50.5, 60.2, 70.9)]),
             Geometry::polygon(ring(10.5, 10.5, 30.5, 40.5), vec![]),
+            // 16 x 16 and 15 x 17 pixels: at and below the 256 values of an 8-bit type.
+            Geometry::polygon(ring(100., 100., 116., 116.), vec![]),
+            Geometry::polygon(ring(200., 100., 215., 117.), vec![]),
         ];
         for (i, g) in geometries.into_iter().enumerate() {
             layer.features.push(Feature { fid: i as u64, geometry: Some(g), attributes: vec![] });
         }
         let names = "count min max mean median quantile_0 quantile_10 quantile_33 quantile_90 quantile_100 mode minority variety";
         let stats: Vec<Statistic> = names.split(' ').map(|s| Statistic::parse(s).unwrap()).collect();
-        let fids = [0, 1, 2];
+        let fids = [0, 1, 2, 3, 4];
         for (data_type, first, values) in
             [(DataType::U8, 0, 256), (DataType::I8, -128, 256), (DataType::U16, 0, 65536), (DataType::I16, -32768, 65536)]
         {
@@ -888,6 +893,13 @@ mod tests {
             assert_eq!(counted.values.len(), 11);
             assert_eq!(finish(&mut counted, &plan, &stats, fractional), finish(&mut listed, &plan, &stats, fractional));
         }
+        // A histogram from as many pixels as the type has values.
+        let plan = Plan::new(&stats, false, &[0]);
+        for (data_type, values) in [(DataType::U8, 256), (DataType::I8, 256), (DataType::U16, 65_536), (DataType::I16, 65_536)] {
+            assert!(Accumulator::new(&plan, values, data_type).histogram.is_some(), "{data_type:?}");
+            assert!(Accumulator::new(&plan, values - 1, data_type).histogram.is_none(), "{data_type:?}");
+        }
+        assert!(Accumulator::new(&plan, 1 << 20, DataType::F32).histogram.is_none());
         // The bins themselves, -0 included.
         let plan = Plan::new(&stats, false, &[0]);
         let (mut counted, mut listed) = (Accumulator::new(&plan, 70_000, DataType::U16), Accumulator::new(&plan, 70_000, DataType::F64));
