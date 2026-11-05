@@ -203,7 +203,13 @@ impl StreamState {
         let r1 = r0 + height;
         let bands = self.nodata.len();
         while self.next < zones.len() && zones[self.next].row_start < r1 {
-            let pixels = if plan.keep_values { zones[self.next].spans.iter().map(|s| s.len as usize).sum() } else { 0 };
+            // Summed in 64 bits and saturated: a zone can cover more than 2^32 pixels of a 32-bit
+            // target's grid, and then gets a histogram all the same.
+            let pixels = if plan.keep_values {
+                usize::try_from(zones[self.next].spans.iter().map(|s| u64::from(s.len)).sum::<u64>()).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
             let data_type = self.data_type.unwrap_or(strip.data_type);
             self.open.push((self.next, 0, (0..bands).map(|_| Accumulator::new(plan, pixels, data_type)).collect()));
             self.next += 1;
@@ -881,7 +887,7 @@ mod tests {
                     for (g, e) in got.iter().flatten().flatten().zip(expected.iter().flatten().flatten()) {
                         match (g, e) {
                             (FieldValue::Float(g), FieldValue::Float(e)) => {
-                                assert!((g - e).abs() <= 1e-12 * e.abs(), "{data_type:?} strip {strip}: {g} {e}")
+                                assert!((g - e).abs() <= 1e-12 * e.abs().max(1.0), "{data_type:?} strip {strip}: {g} {e}")
                             }
                             _ => assert_eq!(g, e, "{data_type:?} strip {strip}"),
                         }

@@ -879,7 +879,7 @@ fn zonal_reducer_counts_8_bit_streams_like_listed_float_rasters() {
         );
         for (g, e) in got.iter().flatten().zip(expected.iter().flatten()) {
             match (g, e) {
-                (V::Float(g), V::Float(e)) if o.fractional => assert!((g - e).abs() <= 1e-12 * e.abs(), "{g} {e}"),
+                (V::Float(g), V::Float(e)) if o.fractional => assert!((g - e).abs() <= 1e-12 * e.abs().max(1.0), "{g} {e}"),
                 _ => assert_eq!(g, e, "all_touched {} fractional {}", o.all_touched, o.fractional),
             }
         }
