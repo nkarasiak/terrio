@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Remote GeoTIFFs and COGs fetch the tiles of a window at their exact byte ranges, as GDAL's
+  `AdviseRead` does, rather than widened to whole 64 KiB blocks (about 64 KiB more per tile), and
+  request the runs of one window at once rather than one after the other. Other readers of the
+  file take the fetched ranges from the process-wide cache. Loading 10 Sentinel-2 dates x 4 bands
+  over a 10 x 10 km area fetches 224 MB, the bytes GDAL fetches, down from 235 MB; warped to the
+  next UTM zone from a server 180 ms away, 4 threads, it takes 12.9 s, down from 21.9 s.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
