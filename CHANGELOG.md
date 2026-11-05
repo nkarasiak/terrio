@@ -101,8 +101,8 @@
   `ops::zonal::zonal_stats` takes
   `ZonalSource`s (a `LazyRaster`, or a path opened only while it is read so that thousands of
   files stay within the open-file limit, and its bands); `zonal_stats_with` hands each finished
-  band to a sink instead of building a layer. `ops::zonal::{ZonalReducer, ZonalStream,
-  ReducerGrid}` reduce arrays supplied strip by strip.
+  band to a sink instead of building a layer. `ops::zonal::{ZonalReducer, ZonalStream}`
+  reduce arrays supplied strip by strip on an `ops::rasterize::Grid`.
 - **Breaking (Rust API, `terrio::ops::zonal`):** the CLI, Python and JavaScript are unchanged.
   - `zonal_stats(zones, &mut sources, &options)` takes `ZonalSource`s instead of a slice of
     `ZonalInput`s (removed). Wrap a raster in memory with `LazyRaster::from(dataset)`, open one

@@ -3855,6 +3855,9 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
     assert.throws(() => new terrio.ZonalReducer(zone, 300, 200, transform, "EPSG:4326", options), message);
   }
   assert.throws(() => new terrio.ZonalReducer(zone, 0, 200, transform, "EPSG:4326"), /must have pixels/);
+  for (const [width, height] of [[-1, 200], [300.5, 200], [300, 2 ** 32]]) {
+    assert.throws(() => new terrio.ZonalReducer(zone, width, height, transform, "EPSG:4326"), /whole number of pixels/);
+  }
   assert.throws(() => new terrio.ZonalReducer(zone, 300, 200, [0, 0.01, 0], "EPSG:4326"), /6 numbers/);
   const done = reducer.stream();
   for (const [i, [, , ww, hh]] of reducer.windows().entries()) done.add(i, new Uint8Array(ww * hh));

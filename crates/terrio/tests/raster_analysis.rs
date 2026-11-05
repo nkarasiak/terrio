@@ -815,8 +815,8 @@ fn reducer_stats() -> Vec<S> {
         .collect()
 }
 
-fn reducer_grid(ds: &RasterDataset) -> terrio::ops::zonal::ReducerGrid {
-    terrio::ops::zonal::ReducerGrid { cols: ds.raster.cols, rows: ds.raster.rows, geo_transform: ds.geo_transform(), crs: ds.crs() }
+fn reducer_grid(ds: &RasterDataset) -> terrio::ops::rasterize::Grid {
+    terrio::ops::rasterize::Grid::like(ds)
 }
 
 /// The pixels of `w`, row-major.
@@ -922,7 +922,7 @@ fn zonal_reducer_rejects_bad_grids_and_empty_stats() {
     let (ds, _, l) = reducer_fixture();
     let new =
         |grid, stats: Vec<S>| ZonalReducer::new(&l, grid, &ZonalOptions { stats, ..Default::default() }, None).err().unwrap().to_string();
-    let grid = |f: &dyn Fn(&mut terrio::ops::zonal::ReducerGrid)| {
+    let grid = |f: &dyn Fn(&mut terrio::ops::rasterize::Grid)| {
         let mut g = reducer_grid(&ds);
         f(&mut g);
         g

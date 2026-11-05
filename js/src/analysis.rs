@@ -290,7 +290,8 @@ struct ReducerOptions {
 /// holding the same values: the zones are computed once for the grid, then each `stream()`
 /// reduces one band, fed the `windows()` in order.
 /// Options: stats (default count, min, max, mean, sum, stddev; not the weighted ones), allTouched,
-/// fractional, layer (of a dataset with several), stripRows (rows per window).
+/// fractional, layer (of a dataset with several), stripRows (rows per window; give a tiled source's
+/// block height to read each block once).
 #[wasm_bindgen(js_name = ZonalReducer)]
 pub struct JsZonalReducer {
     inner: terrio::ops::zonal::ZonalReducer,
@@ -304,13 +305,23 @@ impl JsZonalReducer {
     #[wasm_bindgen(constructor)]
     pub fn new(
         zones: &JsValue,
-        width: usize,
-        height: usize,
+        width: f64,
+        height: f64,
         transform: Vec<f64>,
         crs: Option<String>,
         options: JsValue,
     ) -> Result<JsZonalReducer, JsError> {
-        use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+        use terrio::ops::rasterize::Grid;
+        use terrio::ops::zonal::{Statistic, ZonalOptions, ZonalReducer};
+        // As numbers, not usize: wasm-bindgen would wrap -1 to 4294967295 and truncate 300.7.
+        let size = |name: &str, v: f64| {
+            if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) {
+                Ok(v as usize)
+            } else {
+                Err(JsError::new(&format!("{name} must be a whole number of pixels, at most {}", u32::MAX)))
+            }
+        };
+        let (width, height) = (size("width", width)?, size("height", height)?);
         let a: ReducerOptions = parse_options(&options)?;
         let geo_transform: [f64; 6] =
             transform.try_into().map_err(|_| JsError::new("transform must be a GDAL geotransform of 6 numbers"))?;
@@ -325,14 +336,12 @@ impl JsZonalReducer {
             Some(name) => {
                 layers.drain(..).find(|l| &l.name == name).ok_or_else(|| JsError::new(&format!("no zone layer named '{name}'")))?
             }
-            None if layers.len() > 1 => {
-                return Err(JsError::new("the zones have several layers: choose one with the layer option"));
-            }
-            None => layers.pop().ok_or_else(|| JsError::new("the zones have no layer"))?,
+            None if layers.len() == 1 => layers.remove(0),
+            None => return Err(JsError::new(&format!("the zones have {} layers: choose one with the layer option", layers.len()))),
         };
         let options = ZonalOptions { fractional: a.fractional, stats, all_touched: a.all_touched, ..Default::default() };
         let crs = crs.as_deref().map(terrio::crs::SpatialRef::parse).transpose().map_err(js_err)?.unwrap_or_default();
-        let grid = ReducerGrid { cols: width, rows: height, geo_transform, crs };
+        let grid = Grid { cols: width, rows: height, geo_transform, crs };
         let inner = ZonalReducer::new(&zones, grid, &options, a.strip_rows).map_err(js_err)?;
         Ok(Self { inner, names })
     }

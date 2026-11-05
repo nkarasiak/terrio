@@ -262,7 +262,7 @@ fn zonal_stats(
 ///     fractional: Weight pixels by the fraction of them a zone covers.
 ///     layer: The layer of `zones` to use.
 ///     strip_rows: Rows per strip of `windows()` (default: terrio's strip size for one float64
-///         band of this width).
+///         band of this width). Give a tiled source's block height to read each block once.
 #[pyclass(module = "terrio", name = "ZonalReducer", frozen)]
 pub struct PyZonalReducer {
     inner: terrio::ops::zonal::ZonalReducer,
@@ -288,7 +288,8 @@ impl PyZonalReducer {
         layer: Option<String>,
         strip_rows: Option<usize>,
     ) -> PyResult<Self> {
-        use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+        use terrio::ops::rasterize::Grid;
+        use terrio::ops::zonal::{Statistic, ZonalOptions, ZonalReducer};
         let parsed = match &stats {
             Some(names) => names.iter().map(|s| Statistic::parse(s)).collect::<terrio::Result<Vec<_>>>().py()?,
             None => ZonalOptions::default().stats,
@@ -302,13 +303,13 @@ impl PyZonalReducer {
             .collect();
         let options = ZonalOptions { fractional, stats: parsed, all_touched, ..Default::default() };
         let zones = crate::vector_geom::one_layer(py, zones, layer)?;
-        let grid = ReducerGrid {
+        let grid = Grid {
             cols: width,
             rows: height,
             geo_transform: transform,
             crs: crs.map(terrio::crs::SpatialRef::parse).transpose().py()?.unwrap_or_default(),
         };
-        let inner = py.detach_result(|| ZonalReducer::new(&zones, grid, &options, strip_rows)).py()?;
+        let inner = crate::with_warnings(py, || ZonalReducer::new(&zones, grid, &options, strip_rows))?;
         Ok(Self { inner, stats })
     }
 
@@ -377,7 +378,15 @@ impl PyZonalStream {
             }
         }
         let data = crate::raster::from_numpy(array)?;
-        py.detach_result(|| stream.add(window, &data)).py()
+        let result = py.detach_result(|| stream.add(window, &data));
+        // `add` checks its arguments before adding a pixel; any other error (a panic) may leave
+        // part of the window added, so the stream is dropped.
+        if let Err(e) = &result
+            && !matches!(e, terrio::Error::InvalidArgument(_))
+        {
+            *guard = None;
+        }
+        result.py()
     }
 
     /// The statistics, as `{name: array}` with one value per zone feature, in layer order: int64

@@ -11,6 +11,7 @@ mod index;
 #[path = "zonal_reduce.rs"]
 mod reduce;
 
+use super::rasterize::Grid;
 use crate::crs::SpatialRef;
 use crate::raster::RasterData;
 use crate::{Error, FieldDef, FieldType, FieldValue, Geometry, Layer, LazyRaster, Result, Window};
@@ -445,6 +446,9 @@ pub fn zonal_stats_with(
     if options.stats.iter().any(|s| s.uses_weights()) && options.weights.is_none() {
         return Err(Error::InvalidArgument("weighted statistics require a weighting raster".into()));
     }
+    if sources.iter().all(|s| s.bands.is_empty()) || options.stats.is_empty() {
+        return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
+    }
     check_stats_and_zones(&options.stats, zones)?;
     let weights = options.weights.as_ref().filter(|_| options.stats.iter().any(|s| s.uses_weights()));
     let weight_header = match weights {
@@ -456,9 +460,6 @@ pub fn zonal_stats_with(
         }
         None => None,
     };
-    if sources.iter().all(|s| s.bands.is_empty()) || options.stats.is_empty() {
-        return Err(Error::InvalidArgument("zonal statistics needs at least one raster band and one statistic".into()));
-    }
     let mut grids: Vec<(index::GridKey, Option<index::ZoneIndex>)> = Vec::new();
     // The grid of each source; none for a source without bands, which is not read.
     let mut source_grid: Vec<Option<usize>> = Vec::new();
@@ -577,7 +578,7 @@ pub fn zonal_stats_with(
         // taller); the largest group that fits, or one band.
         let per_band = |n: usize| match plan.value_bytes_per_pixel() {
             0 => 0,
-            bytes => reduce::open_pixels_peak(zone_index, raster.height(), strip_rows(raster, n)) * bytes,
+            bytes => reduce::open_pixels_peak(zone_index, strip_rows(raster, n)) * bytes,
         };
         let group = (1..=bands.len()).rev().find(|&n| n * per_band(n) <= VALUES_PER_PASS).unwrap_or(1);
         let per_band = per_band(group);
@@ -656,19 +657,6 @@ fn release_freed_memory() {
     }
 }
 
-/// The grid of the arrays given to a [`ZonalReducer`].
-#[derive(Debug, Clone)]
-pub struct ReducerGrid {
-    /// Width in pixels.
-    pub cols: usize,
-    /// Height in pixels.
-    pub rows: usize,
-    /// GDAL-style geotransform.
-    pub geo_transform: [f64; 6],
-    /// CRS; unknown only if the zone layer's is too.
-    pub crs: SpatialRef,
-}
-
 /// Zonal statistics of arrays the caller supplies strip by strip (after its own per-pixel
 /// transforms, say), equal to those [`zonal_stats`] gives for a raster holding the same values:
 /// zones are computed once for the grid, then each [`ZonalReducer::stream`] reduces one band.
@@ -677,11 +665,12 @@ pub struct ReducerGrid {
 /// coverage), outside `zonal_stats`' shared budget: feed streams one at a time to bound them.
 ///
 /// ```no_run
-/// use terrio::ops::zonal::{ReducerGrid, Statistic, ZonalOptions, ZonalReducer};
+/// use terrio::ops::rasterize::Grid;
+/// use terrio::ops::zonal::{Statistic, ZonalOptions, ZonalReducer};
 /// use terrio::{crs::SpatialRef, raster::RasterData};
 ///
 /// let zones = terrio::open_vector("fields.gpkg", &Default::default())?;
-/// let grid = ReducerGrid {
+/// let grid = Grid {
 ///     cols: 10980,
 ///     rows: 10980,
 ///     geo_transform: [600000.0, 10.0, 0.0, 5000040.0, 0.0, -10.0],
@@ -720,16 +709,21 @@ impl Reducer {
 impl ZonalReducer {
     /// The zones of `zones` on `grid`, with `options`' statistics and pixel inclusion, and the
     /// [`windows`](Self::windows) to supply: strips of `strip_rows` rows from row 0 (by default
-    /// terrio's strip size for one f64 band of this width) that hold zone pixels, each over the
-    /// rows and columns of those pixels. Weighted statistics are not supported, nor are `dst_srs`
-    /// and `decimal_places` used.
+    /// terrio's strip size for one f64 band of this width; give a tiled source's block height to
+    /// read each block once) that hold zone pixels, each over the rows and columns of those
+    /// pixels. Zones in another CRS than the grid's are reprojected, as `zonal_stats` does.
+    /// Weighted statistics are not supported, nor are `dst_srs` and `decimal_places` used.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] for no statistics, a weighted statistic, `fractional` with
-    /// `all_touched`, `strip_rows` of 0, a quantile outside 0-100, a grid without pixels or with a
-    /// non-finite or non-invertible geotransform, or zones whose CRS differs from the grid's.
-    pub fn new(zones: &Layer, grid: ReducerGrid, options: &ZonalOptions, strip_rows: Option<usize>) -> Result<Self> {
+    /// - [`Error::InvalidArgument`] for no statistics, a duplicate or weighted statistic, a
+    ///   quantile outside 0-100, `fractional` with `all_touched`, `strip_rows` of 0, a grid
+    ///   without pixels, over `u32::MAX` rows or columns, or with a non-finite or non-invertible
+    ///   geotransform, or a zone that is not a polygon or has non-finite coordinates.
+    /// - [`Error::Crs`] when only one of the zones and the grid has a CRS, or a zone cannot be
+    ///   reprojected into the grid's.
+    /// - Any error rasterizing a zone, such as an invalid geometry with `fractional`.
+    pub fn new(zones: &Layer, grid: Grid, options: &ZonalOptions, strip_rows: Option<usize>) -> Result<Self> {
         if options.fractional && options.all_touched {
             return Err(Error::InvalidArgument("fractional coverage and all_touched are mutually exclusive".into()));
         }
@@ -743,12 +737,12 @@ impl ZonalReducer {
             return Err(Error::InvalidArgument("strip_rows must be at least 1".into()));
         }
         check_stats_and_zones(&options.stats, zones)?;
-        let ReducerGrid { cols, rows, geo_transform, crs } = grid;
+        let Grid { cols, rows, geo_transform, crs } = grid;
         super::sample::check_grid(&geo_transform, cols, rows)?;
         let index = index::build(zones, &index::GridKey { cols, rows, geo_transform, crs }, options.all_touched, options.fractional)?;
         let fids = zones.features.iter().map(|f| f.fid).collect();
         let strip_rows = strip_rows.unwrap_or_else(|| super::strips::small_strip_rows(cols, 1, std::mem::size_of::<f64>(), None));
-        let windows = reduce::strip_windows(&index, rows, strip_rows);
+        let windows = reduce::strip_windows(&index, strip_rows);
         Ok(Self { inner: Arc::new(Reducer { index, stats: options.stats.clone(), fractional: options.fractional, fids, windows }) })
     }
 
