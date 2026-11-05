@@ -976,7 +976,8 @@ mod tests {
         }
     }
 
-    /// A Float32 band past the first is filtered from its own values (the band borrowed in place).
+    /// A Float32 band past the first is filtered from its own values (the band borrowed in place),
+    /// in memory and in strips.
     #[test]
     fn float32_band_two_is_filtered_from_its_own_values() {
         let (w, h) = (17, 13);
@@ -992,6 +993,14 @@ mod tests {
         assert_eq!(picked.raster.data.to_f64_vec(), expected);
         let all = neighbors(&two, &o).unwrap().raster.data.to_f64_vec();
         assert_eq!(all[w * h..], expected[..]);
+        let dir = tempfile::tempdir().unwrap();
+        for (band, from) in [(Some(2), 0), (None, w * h)] {
+            let o = NeighborsOptions { band, ..o.clone() };
+            let path = dir.path().join("strips.tif");
+            let path = path.to_str().unwrap();
+            in_strips(&mut LazyRaster::from(two.clone()), &o, Plan::new(&two, &o).unwrap(), path, &Default::default(), 5).unwrap();
+            assert_eq!(crate::open_raster(path).unwrap().raster.data.to_f64_vec()[from..], expected[..], "band {band:?}");
+        }
     }
 
     #[test]
