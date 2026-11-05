@@ -976,6 +976,24 @@ mod tests {
         }
     }
 
+    /// A Float32 band past the first is filtered from its own values (the band borrowed in place).
+    #[test]
+    fn float32_band_two_is_filtered_from_its_own_values() {
+        let (w, h) = (17, 13);
+        let first: Vec<f32> = (0..w * h).map(|i| (i % 7) as f32).collect();
+        let second: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 211) as f32 - 3.0).collect();
+        let grid = Grid { width: w, height: h, geo_transform: [0., 1., 0., h as f64, 0., -1.] };
+        let both = [first, second.clone()].concat();
+        let two = super::super::build_raster_data(grid, RasterData::F32(both), 2, Some(-3.0), &Default::default()).unwrap();
+        let one = super::super::build_raster_data(grid, RasterData::F32(second), 1, Some(-3.0), &Default::default()).unwrap();
+        let o = NeighborsOptions { methods: vec![NeighborMethod::Median], ..Default::default() };
+        let expected = neighbors(&one, &o).unwrap().raster.data.to_f64_vec();
+        let picked = neighbors(&two, &NeighborsOptions { band: Some(2), ..o.clone() }).unwrap();
+        assert_eq!(picked.raster.data.to_f64_vec(), expected);
+        let all = neighbors(&two, &o).unwrap().raster.data.to_f64_vec();
+        assert_eq!(all[w * h..], expected[..]);
+    }
+
     #[test]
     fn mode_ties_go_to_the_first_value_to_lead() {
         // Row-major neighbours of the centre: 1 2 2 / 1 5 1 / 2 9 9 ... 1 and 2 reach 3 each;
