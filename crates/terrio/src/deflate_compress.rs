@@ -1085,6 +1085,9 @@ pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
     }
     out[pos..pos + 4].copy_from_slice(&zlib_rs::adler32::adler32(1, input).to_be_bytes());
     out.truncate(pos + 4);
+    // The buffer was sized for the uncompressed bound: callers keep every chunk until the file is
+    // assembled, so give the rest back.
+    out.shrink_to_fit();
     out
 }
 
