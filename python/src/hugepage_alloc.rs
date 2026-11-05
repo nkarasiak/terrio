@@ -50,6 +50,12 @@ unsafe impl GlobalAlloc for HugePageAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // A null pointer is ignored, as C's `free` ignores it: openjp2 0.6 deallocates a code
+        // block's `decoded_data` whether or not it was allocated, and `System::dealloc`'s
+        // precondition check aborts on null in a debug build.
+        if ptr.is_null() {
+            return;
+        }
         // SAFETY: forwarded with the caller's guarantees.
         unsafe { System.dealloc(ptr, layout) }
     }
