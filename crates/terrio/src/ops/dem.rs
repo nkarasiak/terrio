@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2006, 2009 Matthew Perry
 // SPDX-FileCopyrightText: Copyright (c) 2009-2013, Even Rouault <even dot rouault at spatialys.com>
+// SPDX-FileCopyrightText: Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
 // SPDX-FileCopyrightText: Copyright (c) 2026 Qiusheng Wu and Terrio contributors
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT AND SunPro
 //
 // Derived from (translated to Rust and modified):
 //   GDAL v3.12.2 and v3.13.3:
 //     apps/gdaldem_lib.cpp
+//   fdlibm, as FreeBSD's msun and the Rust `libm` crate v0.2.16 have it (`fdlibm_atan_nonneg`):
+//     src/s_atan.c (libm: src/math/atan.rs)
 
 //! Terrain analysis: an equivalent of `gdaldem`.
 //!
@@ -430,19 +433,62 @@ impl HillshadeParams {
         (if cang <= 0.0 { 1.0 } else { 1.0 + cang }) as f32
     }
 
-    /// The same-resolution hillshade of GDAL's SSE code path, which uses an approximate
-    /// reciprocal square root refined by one Newton-Raphson step.
+    /// Columns `1..width - 1` of a row (see [`Kernel::row`]): [`Self::same_res`] on rows checked
+    /// for nodata; on the others, as GDAL's SSE code path, four pixels at a time with an
+    /// approximate reciprocal square root refined by one Newton-Raphson step, the last columns
+    /// with [`Self::same_res`].
+    fn same_res_row<T: Px>(&self, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], check: bool) {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU has AVX2.
+            return unsafe { self.same_res_row_avx2(l1, l2, l3, o, check) };
+        }
+        self.same_res_row_body(l1, l2, l3, o, check);
+    }
+
+    /// [`Self::same_res_row`] with AVX2's vectors: the same operations, so the same values.
     #[cfg(target_arch = "x86_64")]
-    fn same_res_simd<T: Px>(&self, w: &[T; 9]) -> f32 {
-        let (x, y) = Self::same_res_acc(w);
-        let xx_plus_yy = x * x + y * y;
-        let num = self.sin_alt_mul_254
-            + self.sin_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * x
-            + self.cos_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * y;
-        let denom = 1.0 + self.square_z_mul_square_inv_res * xx_plus_yy;
-        let r = approx_inv_sqrt(denom);
-        let res = (num * r) as f32 + 1.0;
-        if 1.0 > res { 1.0 } else { res }
+    #[target_feature(enable = "avx2")]
+    fn same_res_row_avx2<T: Px>(&self, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], check: bool) {
+        self.same_res_row_body(l1, l2, l3, o, check);
+    }
+
+    #[inline(always)]
+    fn same_res_row_body<T: Px>(&self, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], check: bool) {
+        let w = o.len();
+        let mut j = 1;
+        if check {
+            while j + LANES < w {
+                let (a, b, c) = window_rows::<T, LANES>(l1, l2, l3, j);
+                for (k, o) in o[j..j + LANES].iter_mut().enumerate() {
+                    *o = self.same_res(&[a[k], a[k + 1], a[k + 2], b[k], b[k + 1], b[k + 2], c[k], c[k + 1], c[k + 2]]);
+                }
+                j += LANES;
+            }
+        } else {
+            #[cfg(target_arch = "x86_64")]
+            while j + 4 < w {
+                let (a, b, c) = window_rows::<T, 4>(l1, l2, l3, j);
+                let (mut num, mut denom) = ([0.0f64; 4], [0.0f64; 4]);
+                for k in 0..4 {
+                    let (x, y) = Self::same_res_acc(&[a[k], a[k + 1], a[k + 2], b[k], b[k + 1], b[k + 2], c[k], c[k + 1], c[k + 2]]);
+                    num[k] = self.sin_alt_mul_254
+                        + self.sin_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * x
+                        + self.cos_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * y;
+                    denom[k] = 1.0 + self.square_z_mul_square_inv_res * (x * x + y * y);
+                }
+                let r = approx_inv_sqrt4(denom);
+                for k in 0..4 {
+                    let res = (num[k] * r[k]) as f32 + 1.0;
+                    o[j + k] = if 1.0 > res { 1.0 } else { res };
+                }
+                j += 4;
+            }
+        }
+        while j + 1 < w {
+            o[j] = self.same_res(&[l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]]);
+            j += 1;
+        }
     }
 
     fn combined<T: Px>(&self, w: &[T; 9]) -> f32 {
@@ -479,15 +525,26 @@ impl HillshadeParams {
     }
 }
 
-/// GDAL's `ApproxADivByInvSqrtB()` reciprocal square root: `_mm_rsqrt_ps` on the value rounded
-/// to single precision, then one Newton-Raphson step in double precision.
+/// GDAL's `ApproxADivByInvSqrtB()` reciprocal square root of four values: `_mm_rsqrt_ps` on
+/// the values rounded to single precision, then one Newton-Raphson step in double precision.
 #[cfg(target_arch = "x86_64")]
-#[inline]
-fn approx_inv_sqrt(b: f64) -> f64 {
-    use std::arch::x86_64::{_mm_cvtss_f32, _mm_rsqrt_ss, _mm_set_ss};
-    // SAFETY: SSE is part of the x86-64 baseline, so these instructions are always available.
-    let r = unsafe { _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(b as f32))) } as f64;
-    r * (1.5 - (b * 0.5) * (r * r))
+#[inline(always)]
+fn approx_inv_sqrt4(b: [f64; 4]) -> [f64; 4] {
+    use std::arch::x86_64::{_mm_loadu_ps, _mm_rsqrt_ps, _mm_storeu_ps};
+    let mut r = b.map(|v| v as f32);
+    // SAFETY: SSE is part of the x86-64 baseline; the loads and stores are of the 4 floats of `r`.
+    unsafe { _mm_storeu_ps(r.as_mut_ptr(), _mm_rsqrt_ps(_mm_loadu_ps(r.as_ptr()))) };
+    std::array::from_fn(|k| {
+        let r = r[k] as f64;
+        r * (1.5 - (b[k] * 0.5) * (r * r))
+    })
+}
+
+/// The three rows of the windows of `N` pixels from column `j`: columns `j - 1..j + N + 1`.
+#[inline(always)]
+fn window_rows<'a, T: Px, const N: usize>(l1: &'a [T], l2: &'a [T], l3: &'a [T], j: usize) -> (&'a [T], &'a [T], &'a [T]) {
+    let r = j - 1..j + N + 1;
+    (&l1[r.clone()], &l2[r.clone()], &l3[r])
 }
 
 fn normalize_angle(angle: f64, normalizer: f64) -> f64 {
@@ -667,6 +724,138 @@ fn slope<T: Px>(w: &[T; 9], alg: GradientAlg, ewres_xscale: f64, nsres_yscale: f
     if percent { (100.0 * (key.sqrt() / div)) as f32 } else { ((key.sqrt() / div).atan() * R2D) as f32 }
 }
 
+/// [`slope`] in degrees with Horn's gradient, over columns `1..width - 1` of the row `l2`, in
+/// groups of [`LANES`] the compiler vectorizes. Bit-identical to [`slope`]: the arithmetic is the
+/// same IEEE operations, and [`atan_degrees_f32`] falls back to `f64::atan` wherever its own
+/// arctangent could round to another `f32`.
+fn slope_horn_degrees_row<T: Px>(l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], ew: f64, ns: f64) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has AVX2.
+        return unsafe { slope_horn_degrees_row_avx2(l1, l2, l3, o, ew, ns) };
+    }
+    slope_horn_degrees_row_body(l1, l2, l3, o, ew, ns);
+}
+
+/// [`slope_horn_degrees_row`] with AVX2's four-wide vectors. The same IEEE operations (no FMA
+/// contraction), so the same values.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn slope_horn_degrees_row_avx2<T: Px>(l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], ew: f64, ns: f64) {
+    slope_horn_degrees_row_body(l1, l2, l3, o, ew, ns);
+}
+
+#[inline(always)]
+fn slope_horn_degrees_row_body<T: Px>(l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], ew: f64, ns: f64) {
+    let w = o.len();
+    let mut j = 1;
+    while j + LANES < w {
+        let (a, b, c): (&[T; LANES + 2], &[T; LANES + 2], &[T; LANES + 2]) =
+            match (l1[j - 1..j + LANES + 1].try_into(), l2[j - 1..j + LANES + 1].try_into(), l3[j - 1..j + LANES + 1].try_into()) {
+                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                _ => unreachable!("the rows are `w` long"),
+            };
+        let mut u = [0.0f64; LANES];
+        for (k, u) in u.iter_mut().enumerate() {
+            let (x, y) = horn(&[a[k], a[k + 1], a[k + 2], b[k], b[k + 1], b[k + 2], c[k], c[k + 1], c[k + 2]]);
+            let (dx, dy) = (x.f64() / ew, y.f64() / ns);
+            *u = (dx * dx + dy * dy).sqrt() / 8.0;
+        }
+        atan_degrees_f32(&u, &mut o[j..j + LANES]);
+        j += LANES;
+    }
+    while j + 1 < w {
+        o[j] = slope(
+            &[l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]],
+            GradientAlg::Horn,
+            ew,
+            ns,
+            false,
+        );
+        j += 1;
+    }
+}
+
+/// The pixels [`slope_horn_degrees_row`] computes together.
+const LANES: usize = 16;
+
+/// `(u.atan() * R2D) as f32` for each `u >= 0` (or NaN). Uses fdlibm's arctangent, written
+/// without branches so it vectorizes; it is within one ulp of the platform's `atan`, so the
+/// `f32` it rounds to can differ only when the `f64` degrees lie a few ulps from the midpoint
+/// between two `f32` values. Those pixels, and NaN or tiny results, are recomputed with
+/// `f64::atan`.
+#[inline(always)]
+fn atan_degrees_f32(u: &[f64; LANES], out: &mut [f32]) {
+    let mut deg = [0.0f64; LANES];
+    for (d, &x) in deg.iter_mut().zip(u) {
+        *d = fdlibm_atan_nonneg(x) * R2D;
+    }
+    let mut redo = false;
+    for (o, &d) in out.iter_mut().zip(&deg) {
+        *o = d as f32;
+        // The 29 low mantissa bits are what the cast to f32 rounds away; 1 << 28 is the midpoint.
+        let low = d.to_bits() & ((1 << 29) - 1);
+        let near_midpoint = low.wrapping_sub((1 << 28) - 64) < 128;
+        redo |= near_midpoint | !(d >= 1e-30 || d == 0.0);
+    }
+    if redo {
+        for ((o, &d), &x) in out.iter_mut().zip(&deg).zip(u) {
+            let low = d.to_bits() & ((1 << 29) - 1);
+            if low.wrapping_sub((1 << 28) - 64) < 128 || !(d >= 1e-30 || d == 0.0) {
+                *o = (x.atan() * R2D) as f32;
+            }
+        }
+    }
+}
+
+/// fdlibm's `atan` (FreeBSD `s_atan.c`, as the `libm` crate has it) for `x >= 0`, with the
+/// argument reduction chosen by selects rather than branches; the same operations, so the same
+/// result, for `0 <= x < 2^66` outside `(0, 2^-27)`.
+#[inline(always)]
+fn fdlibm_atan_nonneg(x: f64) -> f64 {
+    // fdlibm's constants, by their bits.
+    const ATANHI: [f64; 4] = [
+        f64::from_bits(0x3FDD_AC67_0561_BB4F), // atan(0.5)
+        f64::from_bits(0x3FE9_21FB_5444_2D18), // atan(1)
+        f64::from_bits(0x3FEF_730B_D281_F69B), // atan(1.5)
+        f64::from_bits(0x3FF9_21FB_5444_2D18), // atan(inf)
+    ];
+    const ATANLO: [f64; 4] = [
+        f64::from_bits(0x3C7A_2B7F_222F_65E2),
+        f64::from_bits(0x3C81_A626_3314_5C07),
+        f64::from_bits(0x3C70_0788_7AF0_CBBD),
+        f64::from_bits(0x3C91_A626_3314_5C07),
+    ];
+    const AT: [f64; 11] = [
+        f64::from_bits(0x3FD5_5555_5555_550D),
+        f64::from_bits(0xBFC9_9999_9998_EBC4),
+        f64::from_bits(0x3FC2_4924_9200_83FF),
+        f64::from_bits(0xBFBC_71C6_FE23_1671),
+        f64::from_bits(0x3FB7_45CD_C54C_206E),
+        f64::from_bits(0xBFB3_B0F2_AF74_9A6D),
+        f64::from_bits(0x3FB1_0D66_A0D0_3D51),
+        f64::from_bits(0xBFAD_DE2D_52DE_FD9A),
+        f64::from_bits(0x3FA9_7B4B_2476_0DEB),
+        f64::from_bits(0xBFA2_B444_2C6A_6C2F),
+        f64::from_bits(0x3F90_AD3A_E322_DA11),
+    ];
+    // |x| < 7/16: no reduction; then atan(1/2), atan(1), atan(3/2) and atan(inf) plus a reduced
+    // x. Every candidate is computed and one selected, which the compiler vectorizes.
+    let sel = |c: bool, a: f64, b: f64| if c { a } else { b };
+    let (b0, b1, b2, b3) = (x >= 0.4375, x >= 0.6875, x >= 1.1875, x >= 2.4375);
+    let num = sel(b3, -1.0, sel(b2, x - 1.5, sel(b1, x - 1.0, sel(b0, 2.0 * x - 1.0, x))));
+    let den = sel(b3, x, sel(b2, 1.0 + 1.5 * x, sel(b1, x + 1.0, sel(b0, 2.0 + x, 1.0))));
+    let hi = sel(b3, ATANHI[3], sel(b2, ATANHI[2], sel(b1, ATANHI[1], sel(b0, ATANHI[0], 0.0))));
+    let lo = sel(b3, ATANLO[3], sel(b2, ATANLO[2], sel(b1, ATANLO[1], sel(b0, ATANLO[0], 0.0))));
+    let x = num / den;
+    let z = x * x;
+    let w = z * z;
+    let s1 = z * (AT[0] + w * (AT[2] + w * (AT[4] + w * (AT[6] + w * (AT[8] + w * AT[10])))));
+    let s2 = w * (AT[1] + w * (AT[3] + w * (AT[5] + w * (AT[7] + w * AT[9]))));
+    // With hi = lo = 0 this is fdlibm's `x - x * (s1 + s2)`: negating a rounded difference is exact.
+    hi - ((x * (s1 + s2) - lo) - x)
+}
+
 /// Aspect, as an azimuth or a trigonometric angle; `flat` for flat areas.
 fn aspect<T: Px>(w: &[T; 9], alg: GradientAlg, azimuth: bool, flat: f32) -> f32 {
     let (dx, dy) = match alg {
@@ -719,16 +908,48 @@ fn roughness<T: Px>(w: &[T; 9]) -> f32 {
 
 /// A 3×3 algorithm `f`, with the optional vectorized version GDAL uses on rows free of nodata.
 /// Generic rather than `dyn Fn`, so the algorithm is inlined into `process`'s loop.
-struct Kernel<F, M> {
+struct Kernel<F, M, R> {
     f: F,
     /// Computes columns `1, 1 + 4, ...` in groups of four while `j < width - 4`, returning the
     /// first column it did not compute.
     multi: Option<M>,
+    /// Computes columns `1..width - 1` of a row from the rows above, at and below it, and whether
+    /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give;
+    /// `process` then recomputes the windows holding nodata.
+    row: Option<R>,
 }
 
+/// A 3×3 algorithm, see [`Kernel::f`].
+type WindowFn<T> = fn(&[T; 9]) -> f32;
+
+/// A whole-row version of a kernel, see [`Kernel::row`].
+type RowFn<T> = fn(&[T], &[T], &[T], &mut [f32], bool);
+
 /// A kernel without a vectorized version.
-fn single<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, fn(&[T; 9]) -> f32> {
-    Kernel { f, multi: None }
+fn single<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, WindowFn<T>, RowFn<T>> {
+    Kernel { f, multi: None, row: None }
+}
+
+/// The runs `start..end` of nodata values (as `ComputeVal()` tests them) in `row`.
+fn nodata_runs<T: Px>(row: &[T], nd: T, nd_nan: bool) -> Vec<(usize, usize)> {
+    const CHUNK: usize = 64;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (c, chunk) in row.chunks(CHUNK).enumerate() {
+        // Most chunks have no nodata: a test without branches, which vectorizes, skips them.
+        if !chunk.iter().fold(false, |a, v| a | v.is_nodata(nd, nd_nan)) {
+            continue;
+        }
+        for (j, v) in chunk.iter().enumerate() {
+            if v.is_nodata(nd, nd_nan) {
+                let j = c * CHUNK + j;
+                match runs.last_mut() {
+                    Some(run) if run.1 == j => run.1 = j + 1,
+                    _ => runs.push((j, j + 1)),
+                }
+            }
+        }
+    }
+    runs
 }
 
 /// The rows of a band a 3×3 algorithm runs over: `src` holds rows `src_rows` of a band of
@@ -744,10 +965,11 @@ struct Rows<'a, T> {
 
 /// `GDALGeneric3x3Processing()`: runs a 3×3 algorithm over rows of a band, returning the rows
 /// computed. The values do not depend on how the band is split in rows.
-fn process<T: Px, F, M>(rows: Rows<T>, nodata: Option<T>, dst_nodata: f32, edges: bool, k: &Kernel<F, M>) -> Vec<f32>
+fn process<T: Px, F, M, R>(rows: Rows<T>, nodata: Option<T>, dst_nodata: f32, edges: bool, k: &Kernel<F, M, R>) -> Vec<f32>
 where
     F: Fn(&[T; 9]) -> f32 + Sync,
     M: Fn(&[T; 9]) -> f32 + Sync,
+    R: Fn(&[T], &[T], &[T], &mut [f32], bool) + Sync,
 {
     let Rows { src, width: w, height: h, src_rows, out_rows } = rows;
     let (s0, o0, o1) = (src_rows.start, out_rows.start, out_rows.end);
@@ -760,6 +982,11 @@ where
     let nd_nan = has_nd && nd.f64().is_nan();
     let line_nd: Vec<bool> = (0..src_rows.len()).map(|r| has_nd && src[r * w..(r + 1) * w].iter().any(|v| v.line_nodata(nd))).collect();
     let line_nd = |r: usize| line_nd[r - s0];
+    // For a row kernel, each row's runs of nodata columns `start..end`.
+    let nd_runs: Vec<Vec<(usize, usize)>> = match &k.row {
+        Some(_) if has_nd => (0..src_rows.len()).map(|r| nodata_runs(&src[r * w..(r + 1) * w], nd, nd_nan)).collect(),
+        _ => Vec::new(),
+    };
     let row = |r: usize| &src[(r - s0) * w..(r - s0 + 1) * w];
     let interpol = |a: T, b: T| T::interpol(a, b, has_nd, nd);
     let compute = |mut win: [T; 9], check: bool| -> f32 {
@@ -810,7 +1037,24 @@ where
         }
         let win_at = |j: usize| [l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]];
         let mut j = 1;
-        if let Some(multi) = &k.multi
+        if let Some(row) = &k.row {
+            row(l1, l2, l3, o, check);
+            if check {
+                // The windows with nodata: those within a column of a nodata run of the three rows.
+                let mut runs: Vec<(usize, usize)> = [i - 1, i, i + 1].iter().flat_map(|&r| nd_runs[r - s0].iter().copied()).collect();
+                runs.sort_unstable();
+                let mut done = 1; // The columns below `done` are recomputed.
+                for (start, end) in runs {
+                    let to = (end + 1).min(w - 1);
+                    let from = start.saturating_sub(1).max(done);
+                    for (j, v) in o.iter_mut().enumerate().take(to).skip(from) {
+                        *v = compute(win_at(j), true);
+                    }
+                    done = done.max(to);
+                }
+            }
+            j = w.saturating_sub(1).max(1);
+        } else if let Some(multi) = &k.multi
             && !check
         {
             while j + 4 < w {
@@ -1089,7 +1333,7 @@ impl Terrain {
                     DemProduct::Hillshade if use_float32 => {
                         let f = move |w: &[$t; 9]| float32_terrain.shade(w, false);
                         let multi = move |w: &[$t; 9]| float32_terrain.shade(w, true);
-                        process(rows, nd, dst_nd, edges, &Kernel { f, multi: simd.then_some(multi) })
+                        process(rows, nd, dst_nd, edges, &Kernel { f, multi: simd.then_some(multi), row: None::<RowFn<$t>> })
                     }
                     DemProduct::Hillshade => match o.shading {
                         Shading::MultiDirectional => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| md.shade(w))),
@@ -1097,11 +1341,8 @@ impl Terrain {
                         Shading::Igor => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| hs.igor(w))),
                         Shading::Standard if o.gradient == GradientAlg::Horn && same_res => {
                             let f = move |w: &[$t; 9]| hs.same_res(w);
-                            #[cfg(target_arch = "x86_64")]
-                            let multi = Some(move |w: &[$t; 9]| hs.same_res_simd(w));
-                            #[cfg(not(target_arch = "x86_64"))]
-                            let multi = None::<fn(&[$t; 9]) -> f32>;
-                            process(rows, nd, dst_nd, edges, &Kernel { f, multi })
+                            let row = move |a: &[$t], b: &[$t], c: &[$t], o: &mut [f32], check: bool| hs.same_res_row(a, b, c, o, check);
+                            process(rows, nd, dst_nd, edges, &Kernel { f, multi: None::<WindowFn<$t>>, row: Some(row) })
                         }
                         Shading::Standard => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| hs.standard(w))),
                     },
@@ -1109,6 +1350,11 @@ impl Terrain {
                         let (alg, percent) = (o.gradient, o.slope_percent);
                         if use_float32 {
                             process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| slope_f32(w, alg, ew, ns, percent)))
+                        } else if alg == GradientAlg::Horn && !percent {
+                            let f = move |w: &[$t; 9]| slope(w, alg, ew, ns, percent);
+                            let row =
+                                move |a: &[$t], b: &[$t], c: &[$t], o: &mut [f32], _: bool| slope_horn_degrees_row(a, b, c, o, ew, ns);
+                            process(rows, nd, dst_nd, edges, &Kernel { f, multi: None::<WindowFn<$t>>, row: Some(row) })
                         } else {
                             process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| slope(w, alg, ew, ns, percent)))
                         }
@@ -2093,6 +2339,88 @@ nv 10 20 30 0
         assert!(bits.abs_diff(1115697630) <= 1, "slope differs from GDAL 3.13.3 by more than one ULP");
         let hillshade = hillshade(&ds, &options).unwrap();
         assert_eq!(hillshade.raster.get(0, 1, 1), 236.0);
+    }
+
+    /// Pseudo-random values in `0..1`, without a dependency.
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (*seed >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    #[test]
+    fn vectorized_atan_degrees_round_as_libm() {
+        let mut seed = 7;
+        let mut u: Vec<f64> = (0..200_000).map(|i| lcg(&mut seed) * [1e-3, 0.5, 3.0, 100.0][i % 4]).collect();
+        for b in [0.4375f64, 0.6875, 1.1875, 2.4375] {
+            u.extend([b, f64::from_bits(b.to_bits() - 1), f64::from_bits(b.to_bits() + 1)]);
+        }
+        u.extend([0.0, 1e-300, 1e-12, 2f64.powi(-27), 1e20, 2f64.powi(66), f64::INFINITY, f64::NAN]);
+        u.resize(u.len().next_multiple_of(LANES), 1.0);
+        for chunk in u.as_chunks::<LANES>().0 {
+            let mut out = [0.0f32; LANES];
+            atan_degrees_f32(chunk, &mut out);
+            for (o, x) in out.iter().zip(chunk) {
+                let expected = (x.atan() * R2D) as f32;
+                assert!(o.to_bits() == expected.to_bits() || (o.is_nan() && expected.is_nan()), "atan({x}): {o} != {expected}");
+            }
+        }
+    }
+
+    /// Runs `k` over a `w` × `h` band, as one chunk of rows.
+    fn run_kernel<F, M, R>(src: &[f32], w: usize, h: usize, nodata: Option<f32>, edges: bool, k: &Kernel<F, M, R>) -> Vec<f32>
+    where
+        F: Fn(&[f32; 9]) -> f32 + Sync,
+        M: Fn(&[f32; 9]) -> f32 + Sync,
+        R: Fn(&[f32], &[f32], &[f32], &mut [f32], bool) + Sync,
+    {
+        process(Rows { src, width: w, height: h, src_rows: 0..h, out_rows: 0..h }, nodata, -9999.0, edges, k)
+    }
+
+    #[test]
+    fn row_kernels_give_the_scalar_values_around_nodata() {
+        let (w, h) = (53, 40);
+        let mut seed = 3;
+        for nodata in [f32::NAN, -9999.0] {
+            let mut src: Vec<f32> = (0..w * h).map(|_| (lcg(&mut seed) * 500.0) as f32).collect();
+            // Scattered nodata, a run, and rows without any.
+            for (i, v) in src.iter_mut().enumerate() {
+                if (i / w) % 7 == 0 && lcg(&mut seed) < 0.05 {
+                    *v = nodata;
+                }
+            }
+            src[5 * w + 10..5 * w + 30].fill(nodata);
+            for edges in [false, true] {
+                let (ew, ns) = (30.0, -30.0);
+                let f = move |v: &[f32; 9]| slope(v, GradientAlg::Horn, ew, ns, false);
+                let row = move |a: &[f32], b: &[f32], c: &[f32], o: &mut [f32], _: bool| slope_horn_degrees_row(a, b, c, o, ew, ns);
+                let fast = run_kernel(&src, w, h, Some(nodata), edges, &Kernel { f, multi: None::<WindowFn<f32>>, row: Some(row) });
+                let scalar = run_kernel(&src, w, h, Some(nodata), edges, &single(f));
+                assert!(fast.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()), "slope, nodata {nodata}, edges {edges}");
+
+                let hs = HillshadeParams::new(&[0.0, 30.0, 0.0, 0.0, 0.0, -30.0], &DemOptions::default(), 1.0, 1.0);
+                let row = move |a: &[f32], b: &[f32], c: &[f32], o: &mut [f32], check: bool| hs.same_res_row(a, b, c, o, check);
+                let f = move |v: &[f32; 9]| hs.same_res(v);
+                let fast = run_kernel(&src, w, h, Some(nodata), edges, &Kernel { f, multi: None::<WindowFn<f32>>, row: Some(row) });
+                // GDAL's SSE formula, one pixel at a time, on rows without nodata.
+                #[cfg(target_arch = "x86_64")]
+                let multi = Some(move |v: &[f32; 9]| {
+                    use std::arch::x86_64::{_mm_cvtss_f32, _mm_rsqrt_ss, _mm_set_ss};
+                    let (x, y) = HillshadeParams::same_res_acc(v);
+                    let num = hs.sin_alt_mul_254
+                        + hs.sin_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * x
+                        + hs.cos_az_mul_cos_alt_mul_z_mul_254_mul_inv_res * y;
+                    let b = 1.0 + hs.square_z_mul_square_inv_res * (x * x + y * y);
+                    // SAFETY: SSE is part of the x86-64 baseline.
+                    let r = unsafe { _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(b as f32))) } as f64;
+                    let res = (num * (r * (1.5 - (b * 0.5) * (r * r)))) as f32 + 1.0;
+                    if 1.0 > res { 1.0 } else { res }
+                });
+                #[cfg(not(target_arch = "x86_64"))]
+                let multi = None::<WindowFn<f32>>;
+                let scalar = run_kernel(&src, w, h, Some(nodata), edges, &Kernel { f, multi, row: None::<RowFn<f32>> });
+                assert!(fast.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()), "hillshade, nodata {nodata}, edges {edges}");
+            }
+        }
     }
 
     #[test]
