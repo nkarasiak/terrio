@@ -863,6 +863,8 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// kernel to finish writing back the old pages, which stalls a write replacing a file written
 /// moments before; the file (its permissions, links and open handles) stays the same. A path that
 /// is not a regular file (`/dev/null`, a FIFO) is written as it was before, with no truncation.
+/// On Windows the file is still truncated when opened: a file another process maps cannot be
+/// shortened, so it is refused there, unchanged, rather than after its bytes are overwritten.
 ///
 /// The file's first [`HEAD`] bytes, where formats with a signature put it (TIFF, BigTIFF, PNG,
 /// SQLite), are zeroed at once and written last, by [`Rewrite::finish`]: a write interrupted before
@@ -870,7 +872,7 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// bytes. Headerless data files rely on their header sidecar instead ([`write_headerless`]).
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
     use std::io::Write;
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(cfg!(windows)).open(path)?;
     let meta = file.metadata()?;
     let regular = meta.is_file();
     let mut rewrite = Rewrite { file, regular, finished: false, head: [0; HEAD], head_len: 0, pos: 0, synced: false };
