@@ -750,11 +750,7 @@ fn slope_horn_degrees_row_body<T: Px>(l1: &[T], l2: &[T], l3: &[T], o: &mut [f32
     let w = o.len();
     let mut j = 1;
     while j + LANES < w {
-        let (a, b, c): (&[T; LANES + 2], &[T; LANES + 2], &[T; LANES + 2]) =
-            match (l1[j - 1..j + LANES + 1].try_into(), l2[j - 1..j + LANES + 1].try_into(), l3[j - 1..j + LANES + 1].try_into()) {
-                (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                _ => unreachable!("the rows are `w` long"),
-            };
+        let (a, b, c) = lane_rows(l1, l2, l3, j);
         let mut u = [0.0f64; LANES];
         for (k, u) in u.iter_mut().enumerate() {
             let (x, y) = horn(&[a[k], a[k + 1], a[k + 2], b[k], b[k + 1], b[k + 2], c[k], c[k + 1], c[k + 2]]);
@@ -925,9 +921,55 @@ type WindowFn<T> = fn(&[T; 9]) -> f32;
 /// A whole-row version of a kernel, see [`Kernel::row`].
 type RowFn<T> = fn(&[T], &[T], &[T], &mut [f32], bool);
 
-/// A kernel without a vectorized version.
-fn single<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, WindowFn<T>, RowFn<T>> {
-    Kernel { f, multi: None, row: None }
+/// A kernel whose rows compute `f` over [`LANES`] windows at a time, which the compiler
+/// vectorizes as far as `f` allows; window by window, the values `f` gives.
+#[allow(clippy::type_complexity)]
+fn single<T: Px, F: Fn(&[T; 9]) -> f32 + Copy>(f: F) -> Kernel<F, WindowFn<T>, impl Fn(&[T], &[T], &[T], &mut [f32], bool)> {
+    Kernel { f, multi: None, row: Some(move |l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], _: bool| row_of(&f, l1, l2, l3, o)) }
+}
+
+/// `f` over columns `1..width - 1` of the row `l2` (see [`Kernel::row`]).
+fn row_of<T: Px, F: Fn(&[T; 9]) -> f32>(f: &F, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has AVX2.
+        return unsafe { row_of_avx2(f, l1, l2, l3, o) };
+    }
+    row_of_body(f, l1, l2, l3, o);
+}
+
+/// [`row_of`] with AVX2's vectors: the same IEEE operations (no FMA contraction), so the same values.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn row_of_avx2<T: Px, F: Fn(&[T; 9]) -> f32>(f: &F, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32]) {
+    row_of_body(f, l1, l2, l3, o);
+}
+
+#[inline(always)]
+fn row_of_body<T: Px, F: Fn(&[T; 9]) -> f32>(f: &F, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32]) {
+    let w = o.len();
+    let mut j = 1;
+    while j + LANES < w {
+        let (a, b, c) = lane_rows(l1, l2, l3, j);
+        for (k, o) in o[j..j + LANES].iter_mut().enumerate() {
+            *o = f(&[a[k], a[k + 1], a[k + 2], b[k], b[k + 1], b[k + 2], c[k], c[k + 1], c[k + 2]]);
+        }
+        j += LANES;
+    }
+    while j + 1 < w {
+        o[j] = f(&[l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]]);
+        j += 1;
+    }
+}
+
+/// The three rows of the windows of [`LANES`] pixels from column `j`, as arrays (no bounds checks
+/// in the lanes).
+#[inline(always)]
+fn lane_rows<'a, T: Px>(l1: &'a [T], l2: &'a [T], l3: &'a [T], j: usize) -> (&'a [T; LANES + 2], &'a [T; LANES + 2], &'a [T; LANES + 2]) {
+    match (l1[j - 1..j + LANES + 1].try_into(), l2[j - 1..j + LANES + 1].try_into(), l3[j - 1..j + LANES + 1].try_into()) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        _ => unreachable!("the windows are LANES + 2 wide"),
+    }
 }
 
 /// The rows of a band a 3×3 algorithm runs over: `src` holds rows `src_rows` of a band of
@@ -1305,10 +1347,13 @@ impl Terrain {
                 let (nd, edges) = ($nd, o.compute_edges);
                 // One `process` per algorithm, each with its closure inlined.
                 match product {
-                    DemProduct::Hillshade if use_float32 => {
+                    DemProduct::Hillshade if use_float32 && simd => {
                         let f = move |w: &[$t; 9]| float32_terrain.shade(w, false);
                         let multi = move |w: &[$t; 9]| float32_terrain.shade(w, true);
-                        process(rows, nd, dst_nd, edges, &Kernel { f, multi: simd.then_some(multi), row: None::<RowFn<$t>> })
+                        process(rows, nd, dst_nd, edges, &Kernel { f, multi: Some(multi), row: None::<RowFn<$t>> })
+                    }
+                    DemProduct::Hillshade if use_float32 => {
+                        process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| float32_terrain.shade(w, false)))
                     }
                     DemProduct::Hillshade => match o.shading {
                         Shading::MultiDirectional => process(rows, nd, dst_nd, edges, &single(move |w: &[$t; 9]| md.shade(w))),
@@ -2342,13 +2387,95 @@ nv 10 20 30 0
     }
 
     /// Runs `k` over a `w` × `h` band, as one chunk of rows.
-    fn run_kernel<F, M, R>(src: &[f32], w: usize, h: usize, nodata: Option<f32>, edges: bool, k: &Kernel<F, M, R>) -> Vec<f32>
+    fn run_kernel<T: Px, F, M, R>(src: &[T], w: usize, h: usize, nodata: Option<T>, edges: bool, k: &Kernel<F, M, R>) -> Vec<f32>
     where
-        F: Fn(&[f32; 9]) -> f32 + Sync,
-        M: Fn(&[f32; 9]) -> f32 + Sync,
-        R: Fn(&[f32], &[f32], &[f32], &mut [f32], bool) + Sync,
+        F: Fn(&[T; 9]) -> f32 + Sync,
+        M: Fn(&[T; 9]) -> f32 + Sync,
+        R: Fn(&[T], &[T], &[T], &mut [f32], bool) + Sync,
     {
         process(Rows { src, width: w, height: h, src_rows: 0..h, out_rows: 0..h }, nodata, -9999.0, edges, k)
+    }
+
+    /// `f` one window at a time, without a row version.
+    fn scalar<T, F: Fn(&[T; 9]) -> f32>(f: F) -> Kernel<F, WindowFn<T>, RowFn<T>> {
+        Kernel { f, multi: None, row: None }
+    }
+
+    /// Asserts [`single`]'s row path gives `f`'s values, with and without the edges.
+    fn rows_match_scalar<T: Px, F: Fn(&[T; 9]) -> f32 + Copy + Sync>(src: &[T], w: usize, h: usize, nodata: Option<T>, what: &str, f: F) {
+        for edges in [false, true] {
+            let fast = run_kernel(src, w, h, nodata, edges, &single(f));
+            let slow = run_kernel(src, w, h, nodata, edges, &scalar(f));
+            let bad = fast.iter().zip(&slow).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert!(bad.is_none(), "{what}, edges {edges}: pixel {bad:?}: {} vs {}", fast[bad.unwrap()], slow[bad.unwrap()]);
+        }
+    }
+
+    /// Every algorithm [`single`] runs, row path against the scalar kernel.
+    fn every_single_kernel<T: Px>(src: &[T], w: usize, h: usize, nodata: Option<T>, what: &str) {
+        let gt = [0.0, 30.0, 0.0, 0.0, 0.0, -30.0];
+        for alg in [GradientAlg::Horn, GradientAlg::ZevenbergenThorne] {
+            let what = format!("{what} {alg:?}");
+            let o = DemOptions { gradient: alg, azimuth: 100.0, altitude: 30.0, z: 3.0, ..DemOptions::default() };
+            let (hs, md, f32t) = (
+                HillshadeParams::new(&gt, &o, 1.0, 1.0),
+                MultiDirectionalParams::new(&gt, &o, 1.0, 1.0),
+                Float32Terrain::new(&gt, &o, 1.0, 1.0),
+            );
+            rows_match_scalar(src, w, h, nodata, &format!("{what} standard"), move |v: &[T; 9]| hs.standard(v));
+            rows_match_scalar(src, w, h, nodata, &format!("{what} combined"), move |v: &[T; 9]| hs.combined(v));
+            rows_match_scalar(src, w, h, nodata, &format!("{what} igor"), move |v: &[T; 9]| hs.igor(v));
+            rows_match_scalar(src, w, h, nodata, &format!("{what} multidirectional"), move |v: &[T; 9]| md.shade(v));
+            rows_match_scalar(src, w, h, nodata, &format!("{what} 3.13 hillshade"), move |v: &[T; 9]| f32t.shade(v, false));
+            for percent in [false, true] {
+                rows_match_scalar(src, w, h, nodata, &format!("{what} slope {percent}"), move |v: &[T; 9]| {
+                    slope(v, alg, 30.0, -30.0, percent)
+                });
+                rows_match_scalar(src, w, h, nodata, &format!("{what} 3.13 slope {percent}"), move |v: &[T; 9]| {
+                    slope_f32(v, alg, 30.0, -30.0, percent)
+                });
+            }
+            for azimuth in [false, true] {
+                rows_match_scalar(src, w, h, nodata, &format!("{what} aspect {azimuth}"), move |v: &[T; 9]| {
+                    aspect(v, alg, azimuth, -9999.0)
+                });
+            }
+        }
+        rows_match_scalar(src, w, h, nodata, &format!("{what} TRI Wilson"), tri_wilson::<T>);
+        rows_match_scalar(src, w, h, nodata, &format!("{what} TRI Riley"), tri_riley::<T>);
+        rows_match_scalar(src, w, h, nodata, &format!("{what} TPI"), tpi::<T>);
+        rows_match_scalar(src, w, h, nodata, &format!("{what} roughness"), roughness::<T>);
+    }
+
+    #[test]
+    fn single_kernel_rows_give_the_scalar_values() {
+        let (w, h) = (53, 40);
+        let mut seed = 5;
+        let mut src: Vec<f32> = (0..w * h).map(|_| (lcg(&mut seed) * 500.0) as f32).collect();
+        // Flat areas, and steps along one axis only (signed zero gradients).
+        src[20 * w..23 * w].fill(7.0);
+        for (i, v) in src[30 * w..33 * w].iter_mut().enumerate() {
+            *v = (i % w) as f32;
+        }
+        src[33 * w..36 * w].fill(3.0);
+        for r in 33..36 {
+            src[r * w + 5..r * w + 40].iter_mut().for_each(|v| *v = r as f32);
+        }
+        let ints: Vec<i32> = src.iter().map(|&v| v as i32).collect();
+        every_single_kernel(&src, w, h, None, "f32");
+        every_single_kernel(&ints, w, h, None, "i32");
+        for nodata in [f32::NAN, -9999.0] {
+            let mut src = src.clone();
+            for (i, v) in src.iter_mut().enumerate() {
+                if (i / w) % 7 == 0 && lcg(&mut seed) < 0.05 {
+                    *v = nodata;
+                }
+            }
+            src[5 * w + 10..5 * w + 30].fill(nodata);
+            every_single_kernel(&src, w, h, Some(nodata), &format!("f32 nodata {nodata}"));
+            let ints: Vec<i32> = src.iter().map(|&v| if v.is_nan() { -9999 } else { v as i32 }).collect();
+            every_single_kernel(&ints, w, h, Some(-9999), "i32 nodata");
+        }
     }
 
     #[test]
@@ -2369,7 +2496,7 @@ nv 10 20 30 0
                 let f = move |v: &[f32; 9]| slope(v, GradientAlg::Horn, ew, ns, false);
                 let row = move |a: &[f32], b: &[f32], c: &[f32], o: &mut [f32], _: bool| slope_horn_degrees_row(a, b, c, o, ew, ns);
                 let fast = run_kernel(&src, w, h, Some(nodata), edges, &Kernel { f, multi: None::<WindowFn<f32>>, row: Some(row) });
-                let scalar = run_kernel(&src, w, h, Some(nodata), edges, &single(f));
+                let scalar = run_kernel(&src, w, h, Some(nodata), edges, &scalar(f));
                 assert!(fast.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()), "slope, nodata {nodata}, edges {edges}");
 
                 let hs = HillshadeParams::new(&[0.0, 30.0, 0.0, 0.0, 0.0, -30.0], &DemOptions::default(), 1.0, 1.0);
