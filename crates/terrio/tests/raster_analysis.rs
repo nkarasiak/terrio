@@ -854,7 +854,7 @@ fn zonal_reducer_matches_zonal_stats() {
     }
 }
 
-/// A stream of 8-bit arrays counts its zones (more than 256 pixels) in histograms: the statistics
+/// A stream of 8-bit arrays counts its zones (256 pixels or more) in histograms: the statistics
 /// of `zonal_stats` on the same values in a Float64 raster, which lists them; with fractional
 /// coverage, within the rounding of coverage sums.
 #[test]
@@ -871,6 +871,12 @@ fn zonal_reducer_counts_8_bit_streams_like_listed_float_rasters() {
             stream.add(i, &terrio::raster::RasterData::U8(data.collect())).unwrap();
         }
         let (got, expected) = (stream.finish().unwrap(), zonal_stats_table(&l, &listed, &o));
+        // Zones 0-3 are large enough for histograms (counts exclude nodata, so pixels are more).
+        assert!(
+            got[0][..4].iter().all(|c| matches!(c, V::Integer(n) if *n >= 256) || matches!(c, V::Float(n) if *n >= 256.)),
+            "{:?}",
+            got[0]
+        );
         for (g, e) in got.iter().flatten().zip(expected.iter().flatten()) {
             match (g, e) {
                 (V::Float(g), V::Float(e)) if o.fractional => assert!((g - e).abs() <= 1e-12 * e.abs(), "{g} {e}"),

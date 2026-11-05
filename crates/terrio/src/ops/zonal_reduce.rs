@@ -749,7 +749,7 @@ mod tests {
     }
 
     /// The statistics of `acc` as a finished zone computes them.
-    fn finish(acc: &mut super::Accumulator, plan: &Plan<'_>, stats: &[Statistic], fractional: bool) -> Vec<crate::FieldValue> {
+    fn finish(acc: &mut super::Accumulator, plan: &Plan<'_>, stats: &[Statistic], fractional: bool) -> Vec<FieldValue> {
         let bins = acc.bins(fractional);
         let ranks = super::cumulative(&bins);
         stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect()
@@ -808,8 +808,24 @@ mod tests {
         assert_eq!(mean(&["mean", "stddev", "cv"]), expected);
     }
 
-    /// Zones of more pixels than an 8- or 16-bit band has values are counted in a histogram: the
-    /// same results as the value lists of the same values in a Float64 band.
+    /// A zone of at least as many pixels as its 8- or 16-bit type has values starts with a
+    /// histogram; one pixel fewer, or another type, lists its values.
+    #[test]
+    fn histogram_starts_at_as_many_pixels_as_the_type_has_values() {
+        use super::Accumulator;
+        let stats = [Statistic::Median];
+        let plan = Plan::new(&stats, false, &[0]);
+        for (data_type, values) in [(DataType::U8, 256), (DataType::I8, 256), (DataType::U16, 65_536), (DataType::I16, 65_536)] {
+            assert!(Accumulator::new(&plan, values, data_type).histogram.is_some(), "{data_type:?}");
+            assert!(Accumulator::new(&plan, values - 1, data_type).histogram.is_none(), "{data_type:?}");
+        }
+        assert!(Accumulator::new(&plan, 1 << 20, DataType::F32).histogram.is_none());
+        // Nothing kept without a statistic that needs values.
+        assert!(Accumulator::new(&Plan::new(&[Statistic::Mean], false, &[0]), 1 << 20, DataType::U8).histogram.is_none());
+    }
+
+    /// Zones of at least as many pixels as an 8- or 16-bit band has values are counted in a
+    /// histogram: the same results as the value lists of the same values in a Float64 band.
     #[test]
     fn counted_integer_bands_match_listed_float_bands() {
         let (cols, rows) = (400, 300);
@@ -893,13 +909,6 @@ mod tests {
             assert_eq!(counted.values.len(), 11);
             assert_eq!(finish(&mut counted, &plan, &stats, fractional), finish(&mut listed, &plan, &stats, fractional));
         }
-        // A histogram from as many pixels as the type has values.
-        let plan = Plan::new(&stats, false, &[0]);
-        for (data_type, values) in [(DataType::U8, 256), (DataType::I8, 256), (DataType::U16, 65_536), (DataType::I16, 65_536)] {
-            assert!(Accumulator::new(&plan, values, data_type).histogram.is_some(), "{data_type:?}");
-            assert!(Accumulator::new(&plan, values - 1, data_type).histogram.is_none(), "{data_type:?}");
-        }
-        assert!(Accumulator::new(&plan, 1 << 20, DataType::F32).histogram.is_none());
         // The bins themselves, -0 included.
         let plan = Plan::new(&stats, false, &[0]);
         let (mut counted, mut listed) = (Accumulator::new(&plan, 70_000, DataType::U16), Accumulator::new(&plan, 70_000, DataType::F64));
