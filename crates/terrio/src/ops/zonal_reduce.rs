@@ -371,8 +371,48 @@ fn counted(data_type: DataType) -> bool {
 /// The histogram bin of `v`, if it counts it: an integer from `HISTOGRAM_FIRST` (-0 counts as 0).
 #[inline]
 fn histogram_bin(v: f64) -> Option<usize> {
-    let bin = v - HISTOGRAM_FIRST;
-    (bin >= 0.0 && bin < HISTOGRAM_BINS as f64 && v.fract() == 0.0).then_some(bin as usize)
+    // Saturating: below the first bin is 0, NaN is 0, and either fails the round trip.
+    let bin = (v - HISTOGRAM_FIRST) as usize;
+    (bin < HISTOGRAM_BINS && HISTOGRAM_FIRST + bin as f64 == v).then_some(bin)
+}
+
+/// Equal values of `values` merged as `(value, count)` in increasing order.
+fn counts(mut values: Vec<f64>) -> Vec<(f64, f64)> {
+    // Integers the histogram counts (but -0, which `total_cmp` sorts apart: the round trip of its
+    // bits fails), as 17-bit keys sorted by radix, faster than comparing the values.
+    let key = |v: f64| (v - HISTOGRAM_FIRST) as u32;
+    let counted = |v: f64| (key(v) as usize) < HISTOGRAM_BINS && (HISTOGRAM_FIRST + f64::from(key(v))).to_bits() == v.to_bits();
+    if values.iter().all(|&v| counted(v)) {
+        let mut keys: Vec<u32> = values.iter().map(|&v| key(v)).collect();
+        drop(values);
+        radix_sort(&mut keys);
+        return keys.chunk_by(|a, b| a == b).map(|run| (HISTOGRAM_FIRST + run[0] as f64, run.len() as f64)).collect();
+    }
+    values.sort_unstable_by(f64::total_cmp);
+    values.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as f64)).collect()
+}
+
+/// Sorts keys below 2^17 (histogram bins): a least-significant-digit radix sort of 9 then 8 bits.
+fn radix_sort(keys: &mut Vec<u32>) {
+    const _: () = assert!(HISTOGRAM_BINS <= 1 << 17);
+    let mut sorted = vec![0u32; keys.len()];
+    for (shift, bits) in [(0, 9), (9, 8)] {
+        let digit = |k: u32| ((k >> shift) & ((1 << bits) - 1)) as usize;
+        let mut next = [0usize; 1 << 9];
+        for &k in keys.iter() {
+            next[digit(k)] += 1;
+        }
+        let mut start = 0;
+        for n in &mut next {
+            (*n, start) = (start, start + *n);
+        }
+        for &k in keys.iter() {
+            let d = digit(k);
+            sorted[next[d]] = k;
+            next[d] += 1;
+        }
+        std::mem::swap(keys, &mut sorted);
+    }
 }
 
 impl Accumulator {
@@ -419,7 +459,9 @@ impl Accumulator {
         }
         self.summary.add(v, coverage, plan.moments);
         if plan.keep_values {
-            if let Some(bin) = histogram_bin(v).filter(|_| !self.histogram.is_empty()) {
+            if !self.histogram.is_empty()
+                && let Some(bin) = histogram_bin(v)
+            {
                 self.histogram[bin] += if plan.fractional { coverage } else { 1.0 };
                 return true;
             }
@@ -463,7 +505,7 @@ impl Accumulator {
     /// are emptied. Coverages are summed in sorted order (unstable) in the lists, in the order
     /// they were added in the histogram, so their rounding can differ.
     fn bins(&mut self, fractional: bool) -> Vec<(f64, f64)> {
-        let mut values = std::mem::take(&mut self.values);
+        let values = std::mem::take(&mut self.values);
         let listed: Vec<(f64, f64)> = if fractional {
             let mut pairs: Vec<(f64, f64)> = values.into_iter().zip(std::mem::take(&mut self.coverages)).collect();
             pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -476,8 +518,7 @@ impl Accumulator {
             }
             bins
         } else {
-            values.sort_unstable_by(f64::total_cmp);
-            values.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as f64)).collect()
+            counts(values)
         };
         let histogram = std::mem::take(&mut self.histogram);
         if histogram.is_empty() {
@@ -800,6 +841,35 @@ mod tests {
             assert_eq!(c, l, "fractional {fractional}");
             for &stat in &stats {
                 assert_eq!(counted.stat(stat, &plan, &c), listed.stat(stat, &plan, &l), "{stat:?} fractional {fractional}");
+            }
+        }
+    }
+
+    /// Integers counted by radix sort, other values compared: the same counts in the same order.
+    #[test]
+    fn counts_sort_integers_by_radix_like_any_values() {
+        let reference = |values: &[f64]| {
+            let mut sorted = values.to_vec();
+            sorted.sort_unstable_by(f64::total_cmp);
+            sorted.chunk_by(|a, b| a == b).map(|run| (run[0], run.len() as f64)).collect::<Vec<_>>()
+        };
+        let integers: Vec<f64> = (0..20_000u64).map(|i| ((i * i * 7919 + i) % 98_304) as f64 - 32_768.0).collect();
+        assert!(integers.contains(&-32_768.0) && integers.iter().any(|&v| v > 60_000.0));
+        let cases = [
+            integers.clone(),
+            [integers.clone(), vec![65_535.0, -32_768.0, 0.0, 0.0]].concat(),
+            // Not all counted: compared, -0 apart from 0 as `total_cmp` sorts it, merged by `==`.
+            [integers.clone(), vec![0.5]].concat(),
+            vec![0.0, -0.0, 3.0, -0.0],
+            vec![70_000.0, 1.0, 1.0],
+            vec![],
+        ];
+        for values in cases {
+            let got = super::counts(values.clone());
+            let expected = reference(&values);
+            assert_eq!(got.len(), expected.len());
+            for (g, e) in got.iter().zip(&expected) {
+                assert_eq!((g.0.to_bits(), g.1), (e.0.to_bits(), e.1));
             }
         }
     }
