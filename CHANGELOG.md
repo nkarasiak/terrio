@@ -17,7 +17,8 @@
   overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, HGT, WebP, GSBG, GeoPackage, netCDF, JPEG 2000,
   PNG, JPEG and RST, with their `.hdr`, ENVI and ERS headers, `.sgrd`, `.rdc` and `.wld` files
   (the other writers are still truncated, among them `.prj` and `.aux.xml` sidecars, XYZ, VRT,
-  GRIB2, MBTiles, PMTiles, Zarr, the formats wbraster writes and those written through GDAL). The file
+  GRIB2, MBTiles, PMTiles, Zarr, the formats wbraster writes and those written through GDAL; on
+  Windows they still truncate first, so a file another process maps is refused unchanged). The file
   stays the same file: a symlink is written through, it keeps its permissions, and its hard links
   and readers holding it open see the new content; a shorter output drops the old tail. The file's
   first 16 bytes, where formats with a signature put it, are zeroed at once and written last, and
@@ -41,8 +42,9 @@
   (0.212 / 0.172 s), hillshade 0.128 / 0.092 s (0.146 / 0.111 s), with the same outputs.
 - On Linux, the Python extension's allocator advises buffers of 4 MiB or more to use transparent
   huge pages (`madvise(MADV_HUGEPAGE)`), as NumPy does for its arrays; under THP's `madvise`
-  mode a raster buffer otherwise takes a page fault every 4 KiB on first write. Other platforms,
-  the Rust crate, the CLI and WebAssembly are unchanged. For a 170 MB float32 raster, one
+  mode a raster buffer otherwise takes a page fault every 4 KiB on first write. The `terrio`
+  command a wheel installs runs in the extension and so advises too; other platforms, the Rust
+  crate, the `terrio-cli` binary and WebAssembly are unchanged. For a 170 MB float32 raster, one
   thread: `Raster.from_array` 0.052 -> 0.020 s, `read()` 0.050 -> 0.021 s, `terrio.dem` slope
   0.27 -> 0.20 s. The allocator ignores the null pointer openjp2 0.6 deallocates when decoding
   JPEG 2000, as `free` does.
@@ -52,8 +54,9 @@
   memory. On the 5610 x 7533 DEM, one thread, `terrio.xarray` masking with 2,000 polygons takes
   0.32 s (was 0.53 s) and cropping to a 2,000-vertex polygon 0.29 s (was 0.59 s).
 - `clip` in `terrio.xarray` (DataArrays and Datasets) and `terrio.rio.features.geometry_mask`
-  take a `terrio.Layer`, burnt without a round trip through GeoJSON on north-up grids (other
-  grids still go through GeoJSON), with the pixels of the GeoJSON path. `clip` reprojects the
+  take a `terrio.Layer`, burnt without a round trip through GeoJSON on north-up grids in memory
+  (other grids, `from_disk=True` and a CRS-less Layer reprojected from `crs=` still go through
+  GeoJSON), with the pixels of the GeoJSON path. `clip` reprojects the
   Layer from its own CRS, or from `crs=` when it has none; a `crs=` differing from the Layer's
   own CRS raises `ValueError`. Masking the 5610 x 7533 DEM with 2,000 polygons from a
   GeoDataFrame, one thread: 0.32 -> 0.14 s.

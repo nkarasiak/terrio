@@ -1592,7 +1592,8 @@ class TerrioArray(XRasterBase):
 
         Args:
             geometries: GeoJSON-like geometries (dicts, or objects with `__geo_interface__`), or
-                a terrio `Layer`, which is burnt without a round trip through GeoJSON.
+                a terrio `Layer`, burnt without a round trip through GeoJSON on north-up grids in
+                memory.
             crs: Their CRS (default: the Layer's own, else the array's).
             all_touched: Keep every pixel a geometry touches (else those whose centre is inside).
             drop: Crop to the geometries' extent.
