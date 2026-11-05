@@ -336,10 +336,10 @@ fn precompute_huffman_header(codes: &mut Codes, p: &mut Precode) {
 
 /******************************** Bit writer **********************************/
 
-/// The output buffer always has 8 bytes of slack past the compress bound, so
-/// a whole word can always be stored at `pos`.
+/// The output buffer is grown before each block to hold the block plus 8 bytes
+/// of slack, so a whole word can always be stored at `pos`.
 struct BitWriter<'a> {
-    out: &'a mut [u8],
+    out: &'a mut Vec<u8>,
     pos: usize,
     bitbuf: u64,
     bitcount: u32,
@@ -464,17 +464,17 @@ impl Compressor {
     }
 
     #[inline(always)]
-    fn choose_match(&mut self, length: u32, offset: u32, seqs: &mut SeqStore) {
+    fn choose_match(&mut self, length: u32, offset: u32, seqs: &mut Vec<Sequence>) {
         let length_slot = LENGTH_SLOT[length as usize] as usize;
         let offset_slot = offset_slot(offset);
         self.freqs.litlen[FIRST_LEN_SYM + length_slot] += 1;
         self.freqs.offset[offset_slot] += 1;
         self.split_stats.observe_match(length);
-        seqs[self.num_seqs] = Sequence {
+        seqs.push(Sequence {
             litrunlen_and_length: self.litrunlen | length << SEQ_LENGTH_SHIFT,
             offset: offset as u16,
             offset_slot: offset_slot as u16,
-        };
+        });
         self.num_seqs += 1;
         self.litrunlen = 0;
     }
@@ -522,8 +522,12 @@ impl Compressor {
             ((w.bitcount + 3).wrapping_neg() & 7) + 32 + 40 * (block_length.div_ceil(65535) as u32 - 1) + 8 * block_length as u32;
 
         let best_cost = dynamic_cost.min(static_cost.min(uncompressed_cost));
-        // The output buffer is libdeflate's compress bound, so the block fits.
-        debug_assert!((w.bitcount + best_cost).div_ceil(8) as usize <= w.out.len() - 8 - w.pos);
+        // Grow the output to the chosen block's size only: a buffer of the whole compress bound
+        // would be zeroed, and its pages touched, on every call.
+        let end = w.pos + (w.bitcount + best_cost).div_ceil(8) as usize + 8;
+        if w.out.len() < end {
+            w.out.resize(end, 0);
+        }
 
         if best_cost == uncompressed_cost {
             let mut in_next = 0;
@@ -938,14 +942,13 @@ fn adjust_max_and_nice_len(max_len: &mut u32, nice_len: &mut u32, remaining: usi
 }
 
 thread_local! {
-    /// The matchfinder (256 KiB) and sequence store (400 KiB), kept per thread:
-    /// allocating them for every call costs page faults.
+    /// The matchfinder (256 KiB) and sequence store (up to 400 KiB), kept per thread:
+    /// allocating them for every call costs page faults. The sequence store is reserved, not
+    /// filled, so only the pages of the sequences a block uses are touched.
     /// The sequences of a block end with the literal run that ends the block
     /// (match length 0).
-    static SCRATCH: Cell<Option<(Box<Matchfinder>, Box<SeqStore>)>> = const { Cell::new(None) };
+    static SCRATCH: Cell<Option<(Box<Matchfinder>, Vec<Sequence>)>> = const { Cell::new(None) };
 }
-
-type SeqStore = [Sequence; SEQ_STORE_LENGTH + 1];
 
 /// deflate_compress_lazy() (lazy2 = false).
 fn compress_lazy<'a>(c: &mut Compressor, s: &[u8], mut w: BitWriter<'a>) -> BitWriter<'a> {
@@ -955,8 +958,7 @@ fn compress_lazy<'a>(c: &mut Compressor, s: &[u8], mut w: BitWriter<'a>) -> BitW
     let mut nice_len = NICE_MATCH_LENGTH.min(max_len);
     let (mut tab, mut seqs) = SCRATCH.take().unwrap_or_else(|| {
         let tab = vec![MF_INITVAL; MF_SIZE].into_boxed_slice().try_into().unwrap();
-        let seqs = vec![Sequence::default(); SEQ_STORE_LENGTH + 1];
-        (tab, seqs.into_boxed_slice().try_into().unwrap())
+        (tab, Vec::with_capacity(SEQ_STORE_LENGTH + 1))
     });
     tab.fill(MF_INITVAL);
     let mut mf = Mf { tab: &mut tab, base: 0, next_hashes: [0, 0] };
@@ -971,6 +973,7 @@ fn compress_lazy<'a>(c: &mut Compressor, s: &[u8], mut w: BitWriter<'a>) -> BitW
         let mut next_recalc_min_len = in_next + (in_end - in_next).min(10000);
         c.litrunlen = 0;
         c.num_seqs = 0;
+        seqs.clear();
         c.split_stats = SplitStats::default();
         c.freqs.litlen.fill(0);
         c.freqs.offset.fill(0);
@@ -1023,9 +1026,8 @@ fn compress_lazy<'a>(c: &mut Compressor, s: &[u8], mut w: BitWriter<'a>) -> BitW
                 break;
             }
         }
-        let n = c.num_seqs;
-        seqs[n] = Sequence { litrunlen_and_length: c.litrunlen, offset: 0, offset_slot: 0 };
-        w = c.finish_block(w, &s[in_block_begin..in_next], &seqs[..=n], in_next == in_end);
+        seqs.push(Sequence { litrunlen_and_length: c.litrunlen, offset: 0, offset_slot: 0 });
+        w = c.finish_block(w, &s[in_block_begin..in_next], &seqs, in_next == in_end);
         if in_next == in_end {
             SCRATCH.set(Some((tab, seqs)));
             return w;
@@ -1037,9 +1039,9 @@ fn compress_lazy<'a>(c: &mut Compressor, s: &[u8], mut w: BitWriter<'a>) -> BitW
 /// produces at compression level 6.
 pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
     let n = input.len();
-    // libdeflate_zlib_compress_bound(), plus 8 bytes of slack for word stores.
-    let bound = 6 + 5 * n.div_ceil(MIN_BLOCK_LENGTH).max(1) + n;
-    let mut out = vec![0u8; bound + 8];
+    // Room for the header, a stored input of up to MAX_PASSTHROUGH_SIZE bytes and the trailer;
+    // flush_block() grows it for each block.
+    let mut out = vec![0u8; 2 + 5 + MAX_PASSTHROUGH_SIZE + 4];
     out[0] = 0x78; // CM = deflate, CINFO = 32K window
     out[1] = 0x9C; // FLEVEL = default, FCHECK
     let mut pos = 2;
@@ -1085,8 +1087,7 @@ pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
     }
     out[pos..pos + 4].copy_from_slice(&zlib_rs::adler32::adler32(1, input).to_be_bytes());
     out.truncate(pos + 4);
-    // The buffer was sized for the uncompressed bound: callers keep every chunk until the file is
-    // assembled, so give the rest back.
+    // Callers keep every chunk until the file is assembled: give the slack back.
     out.shrink_to_fit();
     out
 }
