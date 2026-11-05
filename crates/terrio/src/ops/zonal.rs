@@ -352,7 +352,9 @@ fn strip_rows(raster: &LazyRaster, bands: usize) -> usize {
 /// every source on it. Sources are read lazily in strips of whole block rows, skipping strips
 /// without zones, so rasters are never loaded whole. Median, quantiles, mode, minority and variety
 /// keep the values of each zone being reduced, for every band of every source read at once (as
-/// many as the pool has threads): memory grows with zone size, not with the raster.
+/// many as the pool has threads): memory grows with zone size, not with the raster. Of 8- and
+/// 16-bit integer bands, a zone keeps at most 98,304 values and counts the rest in a histogram of
+/// 768 KiB, with the same results.
 ///
 /// `dst_srs` reprojects output geometries after analysis; `decimal_places` rounds only newly
 /// computed floating statistics. Both are optional and leave integer counts and source attributes intact.
@@ -569,16 +571,17 @@ pub fn zonal_stats_with(
         // sources are slow. That holds every source's open zones at once, so bound the group.
         let mut weight_raster = weights.map(|w| w.lock().map(|mut r| r.shared())).transpose()?;
         let zone_index = grids[grid].1.as_ref().expect("built above");
-        // Statistics that keep values hold every open zone's values for each band reduced at once.
-        // Bands are reduced in groups whose values take at most `VALUES_PER_PASS` (one band at a
-        // time when one band's take more), so that a zone covering a whole multi-band raster holds
-        // one band's values, as 0.7.0 did. Each further pass reads the raster again. Passes of all
-        // sources share the budget (`hold_values`).
+        // Statistics that keep values hold every open zone's values for each band reduced at once:
+        // of an 8- or 16-bit band, at most `values_per_zone` (a histogram counts the rest). Bands
+        // are reduced in groups whose values take at most `VALUES_PER_PASS` (one band at a time
+        // when one band's take more), so that a zone covering a whole multi-band float raster
+        // holds one band's values, as 0.7.0 did. Each further pass reads the raster again. Passes
+        // of all sources share the budget (`hold_values`).
         // Values per band at the strip height of a pass of `n` bands (strips of fewer bands are
         // taller); the largest group that fits, or one band.
         let per_band = |n: usize| match plan.value_bytes_per_pixel() {
             0 => 0,
-            bytes => reduce::open_pixels_peak(zone_index, strip_rows(raster, n)) * bytes,
+            bytes => reduce::open_pixels_peak(zone_index, strip_rows(raster, n), reduce::values_per_zone(raster.data_type())) * bytes,
         };
         let group = (1..=bands.len()).rev().find(|&n| n * per_band(n) <= VALUES_PER_PASS).unwrap_or(1);
         let per_band = per_band(group);

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Zonal statistics that keep values (median, quantiles, mode, minority, variety) count a zone's
+  values of an 8- or 16-bit integer band in a histogram once it has more than 98,304 of them, so
+  a zone keeps at most 768 KiB per band and its values are no longer sorted. Bands of such
+  rasters are then reduced together rather than one per pass: the median of each of 10 UInt16
+  bands over one zone covering a 10980 x 10980 tile takes 6.1 s and 1.07 GB, down from 24.1 s
+  and 2.88 GB (70 s to 12 s of CPU), and 6.7 s and 1.08 GB with `fractional`, down from 39.6 s
+  and 3.83 GB. Results are unchanged, byte for byte on that tile and on 10,000 fields; with
+  `fractional`, a zone counted in a histogram sums equal values' coverages in another order, so
+  its quantiles can differ in the last digits.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
