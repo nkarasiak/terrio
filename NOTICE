@@ -1608,6 +1608,9 @@ Permission to use, copy, modify, and distribute this
 software is freely granted, provided that this notice
 is preserved.
 
+The Rust libm crate (https://github.com/rust-lang/libm, v0.2.16), whose src/math/atan.rs and
+src/math/atan2.rs carry the notice above, is available under the MIT license.
+
 -------------------------------------------------------------------------------
 matplotlib colormaps (https://matplotlib.org) and ColorBrewer (https://colorbrewer2.org)
 -------------------------------------------------------------------------------
