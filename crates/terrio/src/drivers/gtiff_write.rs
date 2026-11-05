@@ -157,15 +157,57 @@ fn lerc_encode(_data: &[u8], _c: &ChunkInfo, _max_z_error: f64) -> Result<Vec<u8
     Err(Error::disabled("lerc"))
 }
 
-/// Creates the file `path`, first removing a regular file already there as GDAL's `Create()`
-/// does: truncating it in place would wait for the kernel to finish writing back its pages, which
-/// stalls a write that replaces a file written moments before.
-fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::File> {
-    let path = path.as_ref();
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
-        let _ = std::fs::remove_file(path);
+/// Opens the file `path` for writing, creating it, without truncating a file already there: the
+/// writer overwrites it and ends it with [`Rewrite::finish`]. Truncating first would wait for the
+/// kernel to finish writing back the old pages, which stalls a write replacing a file written
+/// moments before; the file (its permissions, links and open handles) stays the same.
+fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    Ok(Rewrite { file, finished: false })
+}
+
+/// A file being written over ([`create_replacing`]). Dropped before [`Self::finish`] (a failed
+/// write), it is emptied, so no mix of new and old bytes is left that could read as a GeoTIFF.
+struct Rewrite {
+    file: std::fs::File,
+    finished: bool,
+}
+
+impl Rewrite {
+    /// Ends the file at the current position, dropping what remains of the previous file.
+    fn finish(&mut self) -> std::io::Result<()> {
+        use std::io::Seek;
+        let end = self.file.stream_position()?;
+        self.file.set_len(end)?;
+        self.finished = true;
+        Ok(())
     }
-    std::fs::File::create(path)
+}
+
+impl Drop for Rewrite {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.file.set_len(0);
+        }
+    }
+}
+
+impl Write for Rewrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for Rewrite {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
 }
 
 /// A Deflate chunk as GDAL writes it: libdeflate's level 6, the same bytes.
@@ -834,6 +876,7 @@ pub(crate) fn write(raster: &Raster, path: &str, opts: &TiffOptions) -> Result<(
     let mut file = std::io::BufWriter::with_capacity(1 << 20, create_replacing(path)?);
     images.write_to(&mut file)?;
     file.flush()?;
+    file.get_mut().finish()?;
     Ok(())
 }
 
@@ -1912,7 +1955,7 @@ enum RowWriter {
 
 /// A GeoTIFF written block row by block row (see [`GeoTiffWriter`]).
 struct TiffRows {
-    file: std::io::BufWriter<std::fs::File>,
+    file: std::io::BufWriter<Rewrite>,
     pos: u64,
     big: bool,
     cols: usize,
@@ -2315,6 +2358,8 @@ impl TiffRows {
         }
         // The first directory's offset, in the header.
         let mut file = self.file.into_inner().map_err(|e| Error::Io(e.into_error()))?;
+        // The header's directory offset is written last: until then the file is no TIFF.
+        file.finish()?;
         use std::io::{Seek, SeekFrom};
         if self.big {
             file.seek(SeekFrom::Start(8))?;
@@ -2423,7 +2468,7 @@ struct CogBuild {
 /// [`write`] lays it out: the IFDs, then the levels' tiles from the smallest overview, copied from
 /// the temporary files. The file is byte for byte the same.
 pub(crate) struct CogWriter {
-    file: std::io::BufWriter<std::fs::File>,
+    file: std::io::BufWriter<Rewrite>,
     bands: usize,
     data_type: DataType,
     encoding: std::sync::Arc<(Compression, CodecParams, Layout)>,
@@ -2784,6 +2829,7 @@ impl CogWriter {
             self.levels[i].spools.clear();
         }
         self.file.flush()?;
+        self.file.get_mut().finish()?;
         Ok(())
     }
 }
@@ -2980,6 +3026,60 @@ fn directories(mut images: Vec<Directory>, big: bool, cog: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rewrite_dropped_unfinished_is_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.tif");
+        std::fs::write(&path, vec![7u8; 1000]).unwrap();
+        let mut rewrite = create_replacing(&path).unwrap();
+        rewrite.write_all(b"new").unwrap();
+        drop(rewrite);
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        std::fs::write(&path, vec![7u8; 1000]).unwrap();
+        let mut rewrite = create_replacing(&path).unwrap();
+        rewrite.write_all(b"new").unwrap();
+        rewrite.finish().unwrap();
+        drop(rewrite);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    /// Writing over a larger file gives the file a fresh write gives, through every writer, and
+    /// keeps the file itself (a hard link to it sees the new content).
+    #[test]
+    fn rewriting_a_larger_file_leaves_only_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let raster = |n: usize| {
+            let cfg = wbraster::RasterConfig { cols: n, rows: n, bands: 1, data_type: wbraster::DataType::F32, ..Default::default() };
+            let data = wbraster::raster::RasterData::F32((0..n * n).map(|v| v as f32).collect());
+            crate::RasterDataset::with_driver(Raster::from_data_native(cfg, data).unwrap(), crate::formats::RasterDriver::GTiff, false)
+        };
+        let small = dir.path().join("small.tif");
+        crate::write_raster_dataset(&raster(20), small.to_str().unwrap(), &Default::default()).unwrap();
+        for driver in [crate::formats::RasterDriver::GTiff, crate::formats::RasterDriver::Cog] {
+            let options = crate::RasterWriteOptions { driver: Some(driver), ..Default::default() };
+            for streamed in [false, true] {
+                let write = |path: &std::path::Path| {
+                    if streamed {
+                        crate::open_raster_lazy(small.to_str().unwrap()).unwrap().write(path.to_str().unwrap(), &options).unwrap();
+                    } else {
+                        crate::write_raster_dataset(&raster(20), path.to_str().unwrap(), &options).unwrap();
+                    }
+                };
+                let (path, link, fresh) = (dir.path().join("out.tif"), dir.path().join("link.tif"), dir.path().join("fresh.tif"));
+                for p in [&path, &link, &fresh] {
+                    let _ = std::fs::remove_file(p);
+                }
+                crate::write_raster_dataset(&raster(300), path.to_str().unwrap(), &options).unwrap();
+                std::fs::hard_link(&path, &link).unwrap();
+                write(&path);
+                write(&fresh);
+                let expected = std::fs::read(&fresh).unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), expected, "{driver:?}, streamed {streamed}");
+                assert_eq!(std::fs::read(&link).unwrap(), expected, "{driver:?}, streamed {streamed}");
+            }
+        }
+    }
 
     #[test]
     fn pixel_is_point_roundtrip_preserves_corners() {
