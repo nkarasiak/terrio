@@ -78,6 +78,6 @@ pub(crate) fn write(r: &Raster, path: &Path) -> Result<()> {
             s.push_str(&format!("{x} {y} {z}\n"));
         }
     }
-    std::fs::write(path, s)?;
+    common::write_replacing(path, s)?;
     common::write_pam(path, &r.crs)
 }

@@ -240,7 +240,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
         let s = if void { NODATA as i16 } else { v.round() as i16 };
         out.extend(s.to_be_bytes());
     }
-    std::fs::write(path, out)?;
+    common::write_replacing(path, out)?;
     Ok(())
 }
 
