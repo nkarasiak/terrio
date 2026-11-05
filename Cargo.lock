@@ -2832,6 +2832,7 @@ name = "terrio-py"
 version = "0.7.0"
 dependencies = [
  "arrow-array",
+ "libc",
  "numpy",
  "pyo3",
  "serde",
