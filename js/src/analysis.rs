@@ -318,7 +318,8 @@ impl JsZonalReducer {
             Some(names) => names.iter().map(|s| Statistic::parse(s)).collect::<terrio::Result<Vec<_>>>().map_err(js_err)?,
             None => ZonalOptions::default().stats,
         };
-        let names = a.stats.unwrap_or_else(|| stats.iter().map(|s| s.name()).collect());
+        // Canonical names (`stddev` for `std`), as `zonalStats` names its fields.
+        let names: Vec<String> = stats.iter().map(|s| s.name()).collect();
         let mut layers = input_layers(zones)?;
         let zones = match &a.layer {
             Some(name) => {
@@ -350,7 +351,7 @@ impl JsZonalReducer {
         self.inner.feature_count()
     }
 
-    /// The statistics computed, as named.
+    /// The statistics computed, by their canonical names (`stddev` for `std`), as fields name them.
     #[wasm_bindgen(getter)]
     pub fn stats(&self) -> Vec<String> {
         self.names.clone()

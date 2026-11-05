@@ -425,6 +425,11 @@ def test_zonal_reducer_defaults_and_fractional_count():
     zones = reducer_zones()
     reducer = terrio.ZonalReducer(zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326")
     assert reducer.stats == ["count", "min", "max", "mean", "sum", "stddev"]
+    # Aliases take their canonical names, as zonal_stats names its fields.
+    aliased = terrio.ZonalReducer(
+        zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["STD", "majority"]
+    )
+    assert aliased.stats == ["stddev", "mode"]
     fractional = terrio.ZonalReducer(
         zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["count"], fractional=True
     )

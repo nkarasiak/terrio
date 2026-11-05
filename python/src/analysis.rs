@@ -293,7 +293,8 @@ impl PyZonalReducer {
             Some(names) => names.iter().map(|s| Statistic::parse(s)).collect::<terrio::Result<Vec<_>>>().py()?,
             None => ZonalOptions::default().stats,
         };
-        let names = stats.unwrap_or_else(|| parsed.iter().map(|s| s.name()).collect());
+        // Canonical names (`stddev` for `std`), as `zonal_stats` names its fields.
+        let names: Vec<String> = parsed.iter().map(|s| s.name()).collect();
         let stats = names
             .into_iter()
             .zip(&parsed)
@@ -323,7 +324,7 @@ impl PyZonalReducer {
         self.inner.feature_count()
     }
 
-    /// The statistics computed, as named.
+    /// The statistics computed, by their canonical names (`stddev` for `std`), as fields name them.
     #[getter]
     fn stats(&self) -> Vec<String> {
         self.stats.iter().map(|(name, _)| name.clone()).collect()

@@ -204,10 +204,10 @@ pub(crate) fn check_raster(ds: &RasterDataset) -> Result<()> {
 pub(crate) fn check_grid(gt: &[f64; 6], cols: usize, rows: usize) -> Result<()> {
     let det = gt[1] * gt[5] - gt[2] * gt[4];
     if gt.iter().any(|v| !v.is_finite()) || det == 0.0 || !det.is_finite() {
-        return Err(Error::InvalidArgument("the raster geotransform must be finite and invertible".into()));
+        return Err(Error::InvalidArgument("the grid geotransform must be finite and invertible".into()));
     }
     if cols == 0 || rows == 0 {
-        return Err(Error::InvalidArgument("the raster must have pixels and at least one band".into()));
+        return Err(Error::InvalidArgument("the grid must have pixels".into()));
     }
     Ok(())
 }

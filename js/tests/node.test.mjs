@@ -3844,6 +3844,7 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
   const transform = [0, 0.01, 0, 2, 0, -0.01];
   const zone = {type: "Polygon", coordinates: [[[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]]};
   const reducer = new terrio.ZonalReducer(zone, 300, 200, transform, "EPSG:4326", {stats: ["count"], stripRows: 37});
+  assert.deepEqual(new terrio.ZonalReducer(zone, 300, 200, transform, "EPSG:4326", {stats: ["STD", "majority"]}).stats, ["stddev", "mode"]);
   const [[, , w, h], [, , w1, h1]] = reducer.windows();
   const stream = reducer.stream();
   assert.throws(() => stream.add(0, new Float64Array(w * h + 1)), /pixels, expected/);
