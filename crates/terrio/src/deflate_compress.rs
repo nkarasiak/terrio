@@ -13,7 +13,7 @@
 //! A zlib (RFC 1950) / Deflate (RFC 1951) compressor: libdeflate's level 6, giving the same bytes.
 //! Lazy parsing with the hash-chains matchfinder (max_search_depth 35, nice_match_length 65),
 //! libdeflate's block splitting, length-limited Huffman codes and the stored / static / dynamic
-//! block choice. GDAL compresses GeoTIFF Deflate chunks with libdeflate at this level.
+//! block choice. GDAL (3.12) built with libdeflate compresses GeoTIFF Deflate chunks at this level.
 
 use std::cell::Cell;
 use std::hint::select_unpredictable;

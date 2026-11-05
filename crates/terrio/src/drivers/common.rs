@@ -861,16 +861,21 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// Opens the file `path` for writing, creating it, without truncating a file already there: the
 /// writer overwrites it and ends it with [`Rewrite::finish`]. Truncating first would wait for the
 /// kernel to finish writing back the old pages, which stalls a write replacing a file written
-/// moments before; the file (its permissions, links and open handles) stays the same.
+/// moments before; the file (its permissions, links and open handles) stays the same. A path that
+/// is not a regular file (`/dev/null`, a FIFO) is written as it was before, with no truncation.
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
     let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
-    Ok(Rewrite { file, finished: false })
+    let regular = file.metadata()?.is_file();
+    Ok(Rewrite { file, regular, finished: false })
 }
 
 /// A file being written over ([`create_replacing`]). Dropped before [`Self::finish`] (a failed
-/// write), it is emptied, so no mix of new and old bytes is left that could read as a raster.
+/// write), a regular file is emptied, so no mix of new and old bytes is left that could read as a
+/// raster.
 pub(crate) struct Rewrite {
     file: std::fs::File,
+    /// A regular file, which can be cut to length; a device or a FIFO cannot.
+    regular: bool,
     finished: bool,
 }
 
@@ -878,8 +883,10 @@ impl Rewrite {
     /// Ends the file at the current position, dropping what remains of the previous file.
     pub(crate) fn finish(&mut self) -> std::io::Result<()> {
         use std::io::Seek;
-        let end = self.file.stream_position()?;
-        self.file.set_len(end)?;
+        if self.regular {
+            let end = self.file.stream_position()?;
+            self.file.set_len(end)?;
+        }
         self.finished = true;
         Ok(())
     }
@@ -887,7 +894,7 @@ impl Rewrite {
 
 impl Drop for Rewrite {
     fn drop(&mut self) {
-        if !self.finished {
+        if self.regular && !self.finished {
             let _ = self.file.set_len(0);
         }
     }
@@ -922,6 +929,13 @@ pub(crate) fn write_replacing(path: impl AsRef<std::path::Path>, bytes: impl AsR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A device is written over as before, with no truncation to fail on.
+    #[cfg(unix)]
+    #[test]
+    fn writes_replacing_a_device_need_no_truncation() {
+        write_replacing("/dev/null", b"terrio").unwrap();
+    }
 
     #[test]
     fn a_rewrite_dropped_unfinished_is_emptied() {

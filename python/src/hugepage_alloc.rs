@@ -18,9 +18,16 @@ fn advise(p: *mut u8, size: usize) {
     if p.is_null() || size < MIN_SIZE {
         return;
     }
-    const PAGE: usize = 4096;
-    let start = (p as usize).next_multiple_of(PAGE);
-    let end = (p as usize + size) & !(PAGE - 1);
+    // SAFETY: sysconf reads a constant of the system (glibc takes it from the auxiliary vector).
+    let page = match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
+        n if n > 0 && (n as usize).is_power_of_two() => n as usize,
+        _ => return,
+    };
+    let start = (p as usize).next_multiple_of(page);
+    let end = (p as usize + size) & !(page - 1);
+    if end <= start {
+        return;
+    }
     // SAFETY: the range is whole pages of a live allocation; the advice changes how the kernel
     // backs them, not their contents. An error (no THP support) leaves them as they were.
     unsafe { libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_HUGEPAGE) };

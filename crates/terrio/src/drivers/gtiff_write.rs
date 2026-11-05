@@ -158,7 +158,7 @@ fn lerc_encode(_data: &[u8], _c: &ChunkInfo, _max_z_error: f64) -> Result<Vec<u8
     Err(Error::disabled("lerc"))
 }
 
-/// A Deflate chunk as GDAL writes it: libdeflate's level 6, the same bytes.
+/// A Deflate chunk as GDAL 3.12 built with libdeflate writes it: libdeflate's level 6, the same bytes.
 fn deflate(data: &[u8]) -> Result<Vec<u8>> {
     Ok(crate::deflate_compress::zlib_compress(data))
 }

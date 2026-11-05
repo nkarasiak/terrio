@@ -108,6 +108,6 @@ origin = "added"
 reason = "The libdeflate level-6 port's match finder: unaligned 4- and 8-byte loads, match extension and prefetches by raw pointer, as libdeflate does, each bounded by its caller"
 
 [files."python/src/hugepage_alloc.rs"]
-count = 10
+count = 11
 origin = "added"
-reason = "The extension's global allocator: forwards every call to System, and madvise(MADV_HUGEPAGE) on whole pages of large allocations, as NumPy does"
+reason = "The extension's global allocator: forwards every call to System, and madvise(MADV_HUGEPAGE) on whole pages (sysconf's page size) of large allocations, as NumPy does"

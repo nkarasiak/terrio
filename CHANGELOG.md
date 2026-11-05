@@ -3,10 +3,10 @@
 ## Unreleased
 
 - GeoTIFF and COG writers compress Deflate chunks with a pure-Rust port of libdeflate 1.26's
-  level 6 compressor, the library and level GDAL uses for them, in place of zlib-rs. The chunks
-  are libdeflate's, byte for byte: every 512 x 512 tile of six rasters (float32 DEM, int16
-  classes, two Sentinel-2 uint16 bands, float32 reflectance and NDVI), 1,616 tiles, compared
-  equal. On one core, the DEM's 165 tiles compress in 1.36 s, where zlib-rs took 2.6 s and
+  level 6 compressor, in place of zlib-rs: the level GDAL uses for them, and the library it uses
+  when built with libdeflate. The chunks are libdeflate's, byte for byte: every 512 x 512 tile of
+  six rasters (float32 DEM, int16 classes, two Sentinel-2 uint16 bands, float32 reflectance and
+  NDVI), 1,616 tiles, compared equal outside the test suite, whose tests check round trips. On one core, the DEM's 165 tiles compress in 1.36 s, where zlib-rs took 2.6 s and
   libdeflate 1.65 s (a Sentinel-2 band: 1.98 / 3.6 / 2.24 s), to 136.46 MB, as libdeflate's,
   where zlib-rs's took 136.09 MB. Writing the 5610 x 7533 DEM as a Deflate COG takes 2.75 s of
   CPU, down from 3.7 s (rioxarray: 2.95 s); its pixels and overviews equal GDAL's, and its size
@@ -19,14 +19,19 @@
   files (`.prj` and `.aux.xml` sidecars, GRIB2, MBTiles, PMTiles and Zarr are still truncated).
   The file stays the same file: a symlink is written through, it keeps its permissions, and its
   hard links and readers holding it open see the new content; a shorter output drops the old
-  tail. A write that fails now leaves the file empty rather than holding part of the new one.
+  tail. A write that fails partway through leaves the file empty rather than holding part of the
+  new one; one that fails while encoding, before the file is opened, leaves it as it was, and a
+  GeoTIFF's last header update and the sidecars come after the data file is finished, so their
+  failure leaves the new data. A path that is not a regular file (a device such as `/dev/null`,
+  a FIFO) is written as before, without truncation.
   Rewriting a 170 MB GeoTIFF eight times takes a steady 0.22 s each, where truncating took 0.07
   to 0.8 s with stalls; a 170 MB Float32 raster written eight times over the same path takes
   0.10 to 0.11 s per write as EHdr (was 0.15 to 0.16 s), 0.11 to 0.12 s as ENVI (0.15 to
   0.76 s), 0.10 to 0.11 s as SAGA (0.15 to 0.39 s) and 0.25 s as RST (0.30 to 0.67 s). A slope
   file-to-file benchmark takes 0.53 s, where it took 1.01 s (`gdaldem`: 0.90 s).
-- Python operations given a `terrio.Raster` held in memory share it instead of copying it; only
-  a `mask=` raster of `footprint` and `polygonize` is still copied. An operation does not change
+- Python operations given a `terrio.Raster` held in memory share it instead of copying it; the
+  `mask=` raster of `footprint` and `polygonize`, the rasters of the point-cloud functions and
+  the rasters written as netCDF groups are still copied. An operation does not change
   a raster in memory, so the sharing is not visible. On a large DEM in memory, one thread, with
   nodata / without: TPI takes 0.068 / 0.034 s (was 0.086 / 0.052 s), slope 0.192 / 0.153 s
   (0.212 / 0.172 s), hillshade 0.128 / 0.092 s (0.146 / 0.111 s), with the same outputs.

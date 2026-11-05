@@ -262,7 +262,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
             }
         }
     }
-    let mut file = Vec::new();
+    let mut file = std::io::BufWriter::new(common::create_replacing(path)?);
     let mut enc = png::Encoder::new(&mut file, r.cols as u32, r.rows as u32);
     enc.set_color(color);
     enc.set_depth(if sixteen { png::BitDepth::Sixteen } else { png::BitDepth::Eight });
@@ -276,7 +276,7 @@ pub(crate) fn write(r: &Raster, nodata: Option<f64>, path: &Path) -> Result<()> 
     let mut w = enc.write_header().map_err(|e| png_err(path, e))?;
     w.write_image_data(&bytes).map_err(|e| png_err(path, e))?;
     w.finish().map_err(|e| png_err(path, e))?;
-    common::write_replacing(path, file)?;
+    file.into_inner().map_err(std::io::IntoInnerError::into_error)?.finish()?;
     write_world_file(r, path)?;
     common::write_pam(path, &r.crs)
 }
