@@ -3,8 +3,8 @@
 //!
 //! A window operation runs a fast path over whole rows: the same arithmetic, in the same order for
 //! each pixel, vectorized across pixels. The windows holding a value the fast path cannot handle
-//! are found from each row's runs of such values ([`dirty_runs`], once per row) and recomputed
-//! with the operation's per-pixel code ([`dirty_windows`]).
+//! are found from the runs of such values in the rows each window spans ([`dirty_runs`]) and
+//! recomputed with the operation's per-pixel code ([`dirty_windows`]).
 
 /// The runs `start..end` of the values of `row` that `dirty` flags; the whole row, `[(0, len)]`
 /// ([`is_dense`]), once they number more than one per [`DENSE`] values: a row that speckled is
