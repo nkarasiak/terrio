@@ -290,6 +290,10 @@ pub(crate) fn kernels(o: &NeighborsOptions) -> Result<Vec<Kernel>> {
 /// Applies a kernel to a `width` x `height` grid of `Float32` values, as GDAL's
 /// `VRTKernelFilteredSource::FilterData` does, past its edges repeating the edge values.
 /// `nodata` is the source nodata value (as `Float32`).
+///
+/// Away from the edges, rows are computed whole ([`taps_row`]), and the windows holding nodata or
+/// NaN (with a nodata value) recomputed with [`pixel_value`]: the same values, as each pixel's
+/// arithmetic keeps its order.
 // Arithmetic and axis ordering follow GDAL's VRTKernelFilteredSource::FilterData
 // (frmts/vrt/vrtfilters.cpp, MIT; attribution in NOTICE).
 pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nodata: Option<f32>) -> Vec<f32> {
@@ -299,102 +303,322 @@ pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nod
     let mut input = std::borrow::Cow::Borrowed(input);
     for axis in 0..if separable { 2 } else { 1 } {
         let src = &input;
+        let (ry, rx) = match (separable, axis) {
+            (false, _) => (radius, radius),
+            (true, 0) => (radius, 0),
+            _ => (0, radius),
+        };
+        // The taps `(dy, dx, coefficient)` in the order a pixel visits them, zeros left out.
+        let taps: Vec<(isize, isize, f64)> = (-ry..=ry)
+            .flat_map(|dy| (-rx..=rx).map(move |dx| (dy, dx)))
+            .enumerate()
+            .map(|(i, (dy, dx))| (dy, dx, if separable { k.coefs[(dy + dx + radius) as usize] } else { k.coefs[i] }))
+            .filter(|t| t.2 != 0.0)
+            .collect();
+        let (ry, rx) = (ry as usize, rx as usize);
+        // Ranks and counts grow with the square of the taps: past these, one pixel at a time.
+        let rows = match k.function {
+            Some(NeighborMethod::Median) => taps.len() <= 49,
+            Some(NeighborMethod::Mode) => taps.len() <= 121,
+            _ => true,
+        };
+        // Each row's runs of the values a window leaves out.
+        let runs: Vec<Vec<(usize, usize)>> = match nodata {
+            Some(nd) if rows => crate::par::map_range(height, |y| {
+                super::window::dirty_runs(&src[y * width..(y + 1) * width], |v: f32| v == nd || v.is_nan())
+            }),
+            _ => Vec::new(),
+        };
         let mut output = vec![0f32; width * height];
         crate::par::chunks_mut(&mut output, width.max(1), |y, row| {
-            let mut values = Vec::new();
-            let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            for (x, out) in row.iter_mut().enumerate() {
-                let center = src[y * width + x];
-                if nodata == Some(center) {
-                    *out = center;
-                    continue;
-                }
-                let (rows, cols) = match (separable, axis) {
-                    (false, _) => (-radius..=radius, -radius..=radius),
-                    (true, 0) => (-radius..=radius, 0..=0),
-                    _ => (0..=0, -radius..=radius),
+            let mut scratch = Scratch::default();
+            let mut pixel = |x: usize| pixel_value(src, width, height, k, nodata, (separable, axis), x, y, &mut scratch);
+            if rows && y >= ry && y + ry < height && width > 2 * rx {
+                taps_row(src, width, y, rx, &taps, k, nodata.unwrap_or(0.0), &mut row[rx..width - rx]);
+                let windows = match runs.is_empty() {
+                    true => Vec::new(),
+                    false => super::window::dirty_windows(runs[y - ry..=y + ry].iter().map(|r| &r[..]), rx, width),
                 };
-                let (mut sum, mut weight, mut valid) = (0.0f64, 0.0f64, 0usize);
-                let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
-                let (mut mean, mut m2) = (0.0f64, 0.0f64);
-                let (mut mode, mut best) = (f64::NAN, 0usize);
-                values.clear();
-                if !counts.is_empty() {
-                    counts.clear();
-                }
-                let mut i = 0;
-                for dy in rows {
-                    for dx in cols.clone() {
-                        let c = if separable { k.coefs[(dy + dx + radius) as usize] } else { k.coefs[i] };
-                        i += 1;
-                        let yy = (y as isize + dy).clamp(0, height as isize - 1) as usize;
-                        let xx = (x as isize + dx).clamp(0, width as isize - 1) as usize;
-                        let v = src[yy * width + xx];
-                        if nodata.is_some() && (nodata == Some(v) || v.is_nan()) {
-                            continue;
-                        }
-                        if c == 0.0 {
-                            continue;
-                        }
-                        let v = f64::from(v) * c;
-                        valid += 1;
-                        match k.function {
-                            Some(NeighborMethod::Max) => max = max.max(v),
-                            Some(NeighborMethod::Min) => min = min.min(v),
-                            Some(NeighborMethod::StdDev) => {
-                                let delta = v - mean;
-                                mean += delta / valid as f64;
-                                m2 += delta * (v - mean);
-                            }
-                            Some(NeighborMethod::Median) => values.push(v),
-                            Some(NeighborMethod::Mode) => {
-                                // GDAL counts values in a std::map: equal values (0 and -0
-                                // too, merged by adding 0) share a count, and the first to
-                                // exceed the best wins.
-                                let n = if v.is_nan() {
-                                    // Preserve the VRT counter: NaNs compare equal to no sample.
-                                    0
-                                } else {
-                                    let count = counts.entry((v + 0.0).to_bits()).or_insert(0);
-                                    *count += 1;
-                                    *count
-                                };
-                                if n > best {
-                                    best = n;
-                                    mode = v;
-                                }
-                            }
-                            _ => {
-                                sum += v;
-                                weight += c;
-                            }
-                        }
+                // The edge columns, then the windows with nodata.
+                for (from, to) in [(0, rx), (width - rx, width)].into_iter().chain(windows) {
+                    for (x, v) in row.iter_mut().enumerate().take(to).skip(from) {
+                        *v = pixel(x);
                     }
                 }
-                let empty = nodata.unwrap_or(0.0);
-                *out = if valid == 0 && k.function.is_some() {
-                    empty
-                } else {
-                    match k.function {
-                        Some(NeighborMethod::Max) => max as f32,
-                        Some(NeighborMethod::Min) => min as f32,
-                        Some(NeighborMethod::Mode) => mode as f32,
-                        Some(NeighborMethod::StdDev) => (m2 / valid as f64).sqrt() as f32,
-                        Some(_) => {
-                            values.sort_by(f64::total_cmp);
-                            let n = values.len();
-                            (if n % 2 == 1 { values[n / 2] } else { (values[n / 2 - 1] + values[n / 2]) / 2.0 }) as f32
-                        }
-                        None if !k.normalized => sum as f32,
-                        None if valid == 0 || weight == 0.0 => empty,
-                        None => (sum / weight) as f32,
-                    }
-                };
+            } else {
+                for (x, v) in row.iter_mut().enumerate() {
+                    *v = pixel(x);
+                }
             }
         });
         input = std::borrow::Cow::Owned(output);
     }
     input.into_owned()
+}
+
+/// The buffers of [`pixel_value`], kept from one pixel to the next.
+#[derive(Default)]
+struct Scratch {
+    values: Vec<f64>,
+    counts: std::collections::HashMap<u64, usize>,
+}
+
+/// The filtered value of pixel `(x, y)`: one pass (`(separable, axis)`) of [`filter`].
+#[allow(clippy::too_many_arguments)]
+fn pixel_value(
+    src: &[f32],
+    width: usize,
+    height: usize,
+    k: &Kernel,
+    nodata: Option<f32>,
+    (separable, axis): (bool, usize),
+    x: usize,
+    y: usize,
+    scratch: &mut Scratch,
+) -> f32 {
+    let radius = (k.size / 2) as isize;
+    let Scratch { values, counts } = scratch;
+    let center = src[y * width + x];
+    if nodata == Some(center) {
+        return center;
+    }
+    let (rows, cols) = match (separable, axis) {
+        (false, _) => (-radius..=radius, -radius..=radius),
+        (true, 0) => (-radius..=radius, 0..=0),
+        _ => (0..=0, -radius..=radius),
+    };
+    let (mut sum, mut weight, mut valid) = (0.0f64, 0.0f64, 0usize);
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut mean, mut m2) = (0.0f64, 0.0f64);
+    let (mut mode, mut best) = (f64::NAN, 0usize);
+    values.clear();
+    if !counts.is_empty() {
+        counts.clear();
+    }
+    let mut i = 0;
+    for dy in rows {
+        for dx in cols.clone() {
+            let c = if separable { k.coefs[(dy + dx + radius) as usize] } else { k.coefs[i] };
+            i += 1;
+            let yy = (y as isize + dy).clamp(0, height as isize - 1) as usize;
+            let xx = (x as isize + dx).clamp(0, width as isize - 1) as usize;
+            let v = src[yy * width + xx];
+            if nodata.is_some() && (nodata == Some(v) || v.is_nan()) {
+                continue;
+            }
+            if c == 0.0 {
+                continue;
+            }
+            let v = f64::from(v) * c;
+            valid += 1;
+            match k.function {
+                Some(NeighborMethod::Max) => max = max.max(v),
+                Some(NeighborMethod::Min) => min = min.min(v),
+                Some(NeighborMethod::StdDev) => {
+                    let delta = v - mean;
+                    mean += delta / valid as f64;
+                    m2 += delta * (v - mean);
+                }
+                Some(NeighborMethod::Median) => values.push(v),
+                Some(NeighborMethod::Mode) => {
+                    // GDAL counts values in a std::map: equal values (0 and -0
+                    // too, merged by adding 0) share a count, and the first to
+                    // exceed the best wins.
+                    let n = if v.is_nan() {
+                        // Preserve the VRT counter: NaNs compare equal to no sample.
+                        0
+                    } else {
+                        let count = counts.entry((v + 0.0).to_bits()).or_insert(0);
+                        *count += 1;
+                        *count
+                    };
+                    if n > best {
+                        best = n;
+                        mode = v;
+                    }
+                }
+                _ => {
+                    sum += v;
+                    weight += c;
+                }
+            }
+        }
+    }
+    let empty = nodata.unwrap_or(0.0);
+    if valid == 0 && k.function.is_some() {
+        return empty;
+    }
+    match k.function {
+        Some(NeighborMethod::Max) => max as f32,
+        Some(NeighborMethod::Min) => min as f32,
+        Some(NeighborMethod::Mode) => mode as f32,
+        Some(NeighborMethod::StdDev) => (m2 / valid as f64).sqrt() as f32,
+        Some(_) => median_of(values) as f32,
+        None if !k.normalized => sum as f32,
+        None if valid == 0 || weight == 0.0 => empty,
+        None => (sum / weight) as f32,
+    }
+}
+
+/// The median of `values` (not empty) in `f64::total_cmp`'s order, the mean of the two middle
+/// values for an even count: what sorting them gives, found in linear time (values that compare
+/// equal have the same bits).
+fn median_of(values: &mut [f64]) -> f64 {
+    let n = values.len();
+    let (below, mid, _) = values.select_nth_unstable_by(n / 2, f64::total_cmp);
+    let mid = *mid;
+    if n % 2 == 1 { mid } else { (below.iter().copied().max_by(f64::total_cmp).unwrap_or(mid) + mid) / 2.0 }
+}
+
+/// [`pixel_value`] for the pixels `rx..width - rx` of row `y` (`out`), whose windows are inside
+/// the grid and hold no nodata: sums, means, minimums, maximums and standard deviations taken tap
+/// after tap over the whole row, so each pixel's arithmetic is in its own order; medians and modes
+/// from the ranks and counts of the taps ([`order_row`]).
+#[allow(clippy::too_many_arguments)]
+fn taps_row(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU has AVX2.
+        return unsafe { taps_row_avx2(src, width, y, rx, taps, k, empty, out) };
+    }
+    taps_row_body(src, width, y, rx, taps, k, empty, out);
+}
+
+/// [`taps_row`] with AVX2's vectors: the same operations (no FMA contraction), so the same values.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+fn taps_row_avx2(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
+    taps_row_body(src, width, y, rx, taps, k, empty, out);
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn taps_row_body(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
+    if matches!(k.function, Some(NeighborMethod::Median | NeighborMethod::Mode)) {
+        return order_row(src, width, y, rx, taps, k.function == Some(NeighborMethod::Median), empty, out);
+    }
+    let n = out.len();
+    if k.function == Some(NeighborMethod::StdDev) {
+        // Welford's running mean and sum of squares, every tap valid.
+        let (mut mean, mut m2) = (vec![0.0f64; n], vec![0.0f64; n]);
+        for (t, &(dy, dx, c)) in taps.iter().enumerate() {
+            let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize;
+            let valid = (t + 1) as f64;
+            for ((mean, m2), v) in mean.iter_mut().zip(m2.iter_mut()).zip(&src[from..from + n]) {
+                let v = f64::from(*v) * c;
+                let delta = v - *mean;
+                *mean += delta / valid;
+                *m2 += delta * (v - *mean);
+            }
+        }
+        let count = taps.len() as f64;
+        for (o, m2) in out.iter_mut().zip(&m2) {
+            *o = if taps.is_empty() { empty } else { (m2 / count).sqrt() as f32 };
+        }
+        return;
+    }
+    let start = match k.function {
+        Some(NeighborMethod::Max) => f64::NEG_INFINITY,
+        Some(NeighborMethod::Min) => f64::INFINITY,
+        _ => 0.0,
+    };
+    let mut acc = vec![start; n];
+    for &(dy, dx, c) in taps {
+        let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize;
+        let s = &src[from..from + n];
+        match k.function {
+            Some(NeighborMethod::Max) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.max(f64::from(*v) * c)),
+            Some(NeighborMethod::Min) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.min(f64::from(*v) * c)),
+            _ => acc.iter_mut().zip(s).for_each(|(a, v)| *a += f64::from(*v) * c),
+        }
+    }
+    // `pixel_value`'s results; `taps` empty is a window without a valid neighbour.
+    let weight = taps.iter().fold(0.0, |w, t| w + t.2);
+    let none = taps.is_empty() && (k.function.is_some() || k.normalized);
+    for (o, a) in out.iter_mut().zip(&acc) {
+        *o = match k.function {
+            _ if none => empty,
+            None if k.normalized && weight == 0.0 => empty,
+            None if k.normalized => (*a / weight) as f32,
+            _ => *a as f32,
+        };
+    }
+}
+
+/// The median (`median`) or the mode of the taps of the pixels of `out`, as [`pixel_value`] gives
+/// them, a few pixels at a time: a tap's rank in `f64::total_cmp`'s order (ties by tap order)
+/// picks the median; a tap's count among the taps up to it (equal after adding 0, NaN never)
+/// picks the mode, the first tap whose count exceeds those before.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn order_row(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], median: bool, empty: f32, out: &mut [f32]) {
+    const LANES: usize = 32;
+    let nt = taps.len();
+    if nt == 0 {
+        out.fill(empty);
+        return;
+    }
+    // `f64::total_cmp`'s key: integers in the same order.
+    let total_key = |v: f64| {
+        let b = v.to_bits() as i64;
+        b ^ ((((b >> 63) as u64) >> 1) as i64)
+    };
+    let (mut vals, mut keys) = (vec![[0.0f64; LANES]; nt], vec![[0i64; LANES]; nt]);
+    for x0 in (0..out.len()).step_by(LANES) {
+        let m = LANES.min(out.len() - x0);
+        for (t, &(dy, dx, c)) in taps.iter().enumerate() {
+            let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize + x0;
+            for l in 0..m {
+                let v = f64::from(src[from + l]) * c;
+                vals[t][l] = v;
+                // The mode's equality merges 0 and -0; NaNs take a key no value has.
+                keys[t][l] = if median { total_key(v) } else { (v + 0.0).to_bits() as i64 };
+            }
+        }
+        let mut res = [0.0f64; LANES];
+        if median {
+            let (lo_rank, hi_rank) = ((nt - 1) / 2, nt / 2);
+            let (mut lo, mut hi) = ([0.0f64; LANES], [0.0f64; LANES]);
+            for i in 0..nt {
+                let mut rank = [0usize; LANES];
+                for (j, kj) in keys.iter().enumerate() {
+                    for l in 0..LANES {
+                        let ki = keys[i][l];
+                        rank[l] += usize::from(kj[l] < ki || (j < i && kj[l] == ki));
+                    }
+                }
+                for l in 0..LANES {
+                    lo[l] = if rank[l] == lo_rank { vals[i][l] } else { lo[l] };
+                    hi[l] = if rank[l] == hi_rank { vals[i][l] } else { hi[l] };
+                }
+            }
+            for l in 0..LANES {
+                res[l] = if nt % 2 == 1 { hi[l] } else { (lo[l] + hi[l]) / 2.0 };
+            }
+        } else {
+            let (mut best, mut mode) = ([0usize; LANES], [f64::NAN; LANES]);
+            for i in 0..nt {
+                let mut count = [0usize; LANES];
+                for kj in &keys[..=i] {
+                    for l in 0..LANES {
+                        count[l] += usize::from(kj[l] == keys[i][l]);
+                    }
+                }
+                for l in 0..LANES {
+                    let n = if vals[i][l].is_nan() { 0 } else { count[l] };
+                    if n > best[l] {
+                        best[l] = n;
+                        mode[l] = vals[i][l];
+                    }
+                }
+            }
+            res = mode;
+        }
+        for (o, r) in out[x0..x0 + m].iter_mut().zip(&res) {
+            *o = *r as f32;
+        }
+    }
 }
 
 /// The output bands of `o` over a raster of `bands` bands: `(input band from 1, kernel index)`.
@@ -485,10 +709,14 @@ impl Plan {
         let (w, h) = (strip.raster.cols, strip.raster.rows);
         let rows = out.end - out.start;
         let mut data = RasterData::new_filled(dt, w * rows * self.bands.len(), 0.0);
-        let mut values: Option<(usize, Vec<f32>)> = None;
+        let mut values: Option<(usize, std::borrow::Cow<[f32]>)> = None;
         for (i, (band, kernel)) in self.bands.iter().enumerate() {
             if values.as_ref().is_none_or(|(b, _)| b != band) {
-                let v = super::band_f64(&strip.raster, index(*band)).iter().map(|v| *v as f32).collect();
+                // A Float32 band as it is; others through f64, as before.
+                let v = match &strip.raster.data {
+                    RasterData::F32(d) => std::borrow::Cow::Borrowed(&d[index(*band) * w * h..(index(*band) + 1) * w * h]),
+                    _ => std::borrow::Cow::Owned(super::band_f64(&strip.raster, index(*band)).iter().map(|v| *v as f32).collect()),
+                };
                 values = Some((*band, v));
             }
             let src = &values.as_ref().expect("band read").1;
@@ -585,6 +813,88 @@ mod tests {
     fn kernel(coefs: Vec<f64>, normalized: bool, function: Option<NeighborMethod>) -> Kernel {
         let size = (coefs.len() as f64).sqrt() as usize;
         Kernel { size, coefs, normalized, function }
+    }
+
+    #[test]
+    fn median_of_is_the_sorted_middle() {
+        let mut seed = 5u64;
+        for n in 1..60 {
+            let v: Vec<f64> = (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    [0.0, -0.0, f64::NAN, -f64::NAN, 1.5, -2.0, 3.0][(seed >> 33) as usize % 7]
+                })
+                .collect();
+            let mut sorted = v.clone();
+            sorted.sort_by(f64::total_cmp);
+            let expected = if n % 2 == 1 { sorted[n / 2] } else { (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0 };
+            let got = median_of(&mut v.clone());
+            assert!(got.to_bits() == expected.to_bits() || (got.is_nan() && expected.is_nan()), "{v:?}");
+        }
+    }
+
+    /// `filter` against `pixel_value` at every pixel, so the row versions give the per-pixel values.
+    #[test]
+    fn rows_give_the_per_pixel_values() {
+        let (w, h) = (41, 23);
+        let mut seed = 9u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        // Small integers (many ties), signed zeros, NaN and a nodata value.
+        let src: Vec<f32> = (0..w * h)
+            .map(|_| match next() % 12 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f32::NAN,
+                3 => -9999.0,
+                r => r as f32 - 6.0,
+            })
+            .collect();
+        let methods = [
+            None,
+            Some(NeighborMethod::Max),
+            Some(NeighborMethod::Min),
+            Some(NeighborMethod::StdDev),
+            Some(NeighborMethod::Median),
+            Some(NeighborMethod::Mode),
+        ];
+        // 81 taps: medians one pixel at a time.
+        let matrices = [
+            vec![1.0; 9],
+            vec![0.0, -1.0, 0.0, 2.0, 0.5, 0.0, 0.0, 3.0, -2.0],
+            vec![1.0; 25],
+            vec![0.0; 9],
+            vec![1.0, 2.0, 1.0],
+            vec![1.0; 81],
+        ];
+        for coefs in &matrices {
+            for function in methods {
+                for normalized in [false, true] {
+                    let k = Kernel {
+                        size: if coefs.len() == 3 { 3 } else { (coefs.len() as f64).sqrt() as usize },
+                        coefs: coefs.clone(),
+                        normalized,
+                        function,
+                    };
+                    for nodata in [None, Some(-9999.0f32)] {
+                        let got = filter(&src, w, h, &k, nodata);
+                        // The per-pixel values, pass after pass.
+                        let separable = k.coefs.len() == k.size && k.size != 1;
+                        let mut expected = src.clone();
+                        for axis in 0..if separable { 2 } else { 1 } {
+                            let mut scratch = Scratch::default();
+                            expected = (0..w * h)
+                                .map(|i| pixel_value(&expected, w, h, &k, nodata, (separable, axis), i % w, i / w, &mut scratch))
+                                .collect();
+                        }
+                        let same = got.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits());
+                        assert!(same, "coefs {coefs:?}, {function:?}, normalized {normalized}, nodata {nodata:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
