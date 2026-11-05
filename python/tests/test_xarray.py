@@ -263,6 +263,8 @@ def test_clip_takes_a_layer(files):
     xr.testing.assert_identical(ds.terrio.clip(layer), ds.terrio.clip(polys))
     with pytest.raises(ValueError, match="Layer's own CRS"):
         da.terrio.clip(layer, crs="EPSG:4326")
+    with pytest.raises(ValueError, match="must be 2D"):
+        geometry_mask(layer, (2, 400, 400), da.terrio.transform())
     # A Layer without a CRS of its own takes `crs=`.
     pa = pytest.importorskip("pyarrow")
     bare = terrio.Layer.from_arrow(pa.table({"geometry": pa.array(lon_lat.to_wkb())}))

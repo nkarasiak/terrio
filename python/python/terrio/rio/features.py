@@ -327,7 +327,9 @@ def rasterize(
             out[touched] = (out[touched].astype(np.float64) + sums[touched]).astype(out.dtype)
         else:
             burnt = _burn_values(values, out.dtype)
-            if (burnt == burnt[0]).all():
+            # Compared as bytes, so -0.0 and 0.0 differ and one NaN equals itself.
+            bits = burnt.view(np.uint8).reshape(len(burnt), -1)
+            if (bits == bits[0]).all():
                 # One value (masks, `default_value`): burn the coverage as bytes, not as feature
                 # numbers (a raster 8 times smaller) gathered back into values.
                 ones = [1] * len(geoms)
@@ -359,7 +361,7 @@ def geometry_mask(
 
     Args:
         geometries: GeoJSON-like geometries, or a terrio `Layer` in the grid's CRS, which burns
-            without a round trip through GeoJSON.
+            without a round trip through GeoJSON on north-up grids.
         out_shape: The mask's shape `(rows, cols)`.
         transform: The grid's transform.
         all_touched: Include every pixel a geometry touches.
@@ -372,6 +374,8 @@ def geometry_mask(
         ValueError: If the shape is empty.
     """
     if isinstance(geometries, _terrio.Layer):
+        if len(out_shape) != 2:
+            raise ValueError("Invalid out_shape, must be 2D")
         transform = guard_transform(transform)
         if not _north_up(transform):
             geometries = [f["geometry"] for f in geometries.to_geojson()["features"]]

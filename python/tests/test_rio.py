@@ -605,6 +605,7 @@ def test_features():
         ([2**63 + 5, 1, 2**63 + 9], "uint64"),
         ([1.5, -2.25, float("nan")], "float32"),
         ([1, 2.5, 3], None),
+        ([-0.0, 0.0, -0.0], "float64"),
     ],
 )
 def test_rasterize_overlapping_shapes_match_burning_one_by_one(values, dtype):
@@ -628,6 +629,7 @@ def test_rasterize_overlapping_shapes_match_burning_one_by_one(values, dtype):
             hit = features.geometry_mask([g], (40, 40), T, all_touched=all_touched, invert=True)
             want[hit] = v
         np.testing.assert_array_equal(got, want)
+        np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
 
 
 def test_rasterize_burns_values_as_rasterio():
