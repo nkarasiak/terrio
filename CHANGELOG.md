@@ -12,7 +12,7 @@
   on a 5610 x 7533 Float32 DEM, one thread: 1.45 -> 0.27 s.
 - `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) and VRT
   `KernelFilteredSource` reads compute focal statistics and convolutions a row at a time (medians up
-  to 49 taps, modes up to 121), with AVX2 where the CPU has it, and the per-pixel median selects
+  to 24 taps, modes up to 121), with AVX2 where the CPU has it, and the per-pixel median selects
   instead of sorting. Values are unchanged: `terrio neighbors` outputs equal GDAL's VRT for mean,
   gaussian, u, max and median, with and without nodata, and the previous build's for 20 kernels and
   methods (40 outputs). Mean 3x3 on a 5610 x 7533 DEM, one thread: 1.31 -> 0.15 s.

@@ -294,7 +294,7 @@ pub(crate) fn kernels(o: &NeighborsOptions) -> Result<Vec<Kernel>> {
 ///
 /// Away from the edges, rows are computed whole ([`taps_row`]), and the windows holding nodata or
 /// NaN (with a nodata value) recomputed with [`pixel_value`]: the same values, as each pixel's
-/// arithmetic keeps its order. Medians over more than 49 taps, modes over more than 121, rows
+/// arithmetic keeps its order. Medians over more than 24 taps, modes over more than 121, rows
 /// reaching speckled nodata ([`super::window::is_dense`]) and, in a pass across columns, grids
 /// narrower than the kernel are computed one pixel at a time.
 // Arithmetic and axis ordering follow GDAL's VRTKernelFilteredSource::FilterData
@@ -304,9 +304,10 @@ pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nod
     for axis in 0..if separable(k) { 2 } else { 1 } {
         let pass = Pass::new(&input, width, height, k, nodata, axis);
         let (src, ry, rx) = (pass.src, pass.ry, pass.rx);
-        // Ranks and counts grow with the square of the taps: past these, one pixel at a time.
+        // Ranks and counts grow with the square of the taps: past these, one pixel at a time is
+        // faster (measured; a full 5x5 median already is).
         let rows = match k.function {
-            Some(NeighborMethod::Median) => pass.taps.len() <= 49,
+            Some(NeighborMethod::Median) => pass.taps.len() <= 24,
             Some(NeighborMethod::Mode) => pass.taps.len() <= 121,
             _ => true,
         };
@@ -880,10 +881,11 @@ mod tests {
             Some(NeighborMethod::Median),
             Some(NeighborMethod::Mode),
         ];
-        // 81 taps: medians one pixel at a time.
+        // 25 and 81 taps: medians one pixel at a time; 6 taps: a median of two middle values.
         let matrices = [
             vec![1.0; 9],
             vec![0.0, -1.0, 0.0, 2.0, 0.5, 0.0, 0.0, 3.0, -2.0],
+            vec![1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0],
             vec![1.0; 25],
             vec![0.0; 9],
             vec![1.0, 2.0, 1.0],
