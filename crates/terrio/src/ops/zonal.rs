@@ -670,8 +670,8 @@ fn release_freed_memory() {
 /// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
 /// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
 /// coverage), outside `zonal_stats`' shared budget: feed streams one at a time to bound them. In a
-/// stream fed only 8- or 16-bit integer data, a zone of at least 256 or 65,536 pixels counts them
-/// in a histogram of 2 or 512 KiB instead.
+/// stream fed arrays of one 8- or 16-bit integer type, a zone of at least 256 or 65,536 pixels
+/// counts them in a histogram of 2 or 512 KiB instead.
 ///
 /// ```no_run
 /// use terrio::ops::rasterize::Grid;

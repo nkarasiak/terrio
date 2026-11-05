@@ -756,10 +756,10 @@ mod tests {
     }
 
     /// -0 and 0 keep their own ranks, as when the values were sorted one by one, and are one value
-    /// for mode and variety.
+    /// for mode, minority and variety.
     #[test]
     fn signed_zeros_keep_their_ranks() {
-        let names = "median quantile_25 mode variety";
+        let names = "median quantile_25 mode minority variety";
         let stats: Vec<Statistic> = names.split(' ').map(|s| Statistic::parse(s).unwrap()).collect();
         let plan = Plan::new(&stats, false, &[0]);
         let bits = |values: &[f64]| {
@@ -779,7 +779,9 @@ mod tests {
         // midpoint(-0, 0) is 0.
         assert_eq!(bits(&[0.0, -0.0])[0], 0.0f64.to_bits());
         let got = bits(&[0.0, 5.0, -0.0, 0.0, -0.0]);
-        assert_eq!(got, [0.0f64.to_bits(), (-0.0f64).to_bits(), (-0.0f64).to_bits(), 2]);
+        assert_eq!(got, [0.0f64.to_bits(), (-0.0f64).to_bits(), (-0.0f64).to_bits(), 5.0f64.to_bits(), 2]);
+        // A tie for minority keeps the first value, -0: two -0 and two 0 against two 5.
+        assert_eq!(bits(&[5.0, -0.0, 0.0, 5.0])[3], (-0.0f64).to_bits());
     }
 
     #[test]
