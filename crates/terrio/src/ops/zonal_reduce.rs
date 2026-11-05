@@ -837,6 +837,20 @@ mod tests {
         assert!(Accumulator::new(&Plan::new(&[Statistic::Mean], false, &[0]), 1 << 20, DataType::U8).histogram.is_none());
     }
 
+    /// A pixel count saturated to `usize::MAX` (a zone over 2^32 pixels on a 32-bit target) gets
+    /// unreserved lists instead of a capacity-overflow panic; an 8-bit band still gets a histogram.
+    #[test]
+    fn saturated_pixel_counts_leave_lists_unreserved() {
+        use super::Accumulator;
+        let stats = [Statistic::Median];
+        for fractional in [false, true] {
+            let plan = Plan::new(&stats, fractional, &[0]);
+            let acc = Accumulator::new(&plan, usize::MAX, DataType::F64);
+            assert!(acc.histogram.is_none() && acc.values.capacity() == 0 && acc.coverages.capacity() == 0);
+            assert!(Accumulator::new(&plan, usize::MAX, DataType::U8).histogram.is_some());
+        }
+    }
+
     /// Zones of at least as many pixels as an 8- or 16-bit band has values are counted in a
     /// histogram: the same results as the value lists of the same values in a Float64 band.
     #[test]
