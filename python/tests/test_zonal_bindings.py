@@ -478,7 +478,9 @@ def test_zonal_reducer_errors():
     stream.add(0, np.zeros((h, w)))
     with pytest.raises(terrio.InvalidArgumentError, match="windows"):
         reducer.stream().finish()
-    with pytest.raises(terrio.InvalidArgumentError, match="weighted statistics need a weighting raster"):
+    with pytest.raises(
+        terrio.InvalidArgumentError, match="weighted statistics need a weighting raster"
+    ):
         terrio.ZonalReducer(
             zones, 300, 200, REDUCER_TRANSFORM, "EPSG:4326", stats=["weighted_mean"]
         )
@@ -497,7 +499,9 @@ def test_zonal_reducer_layer_and_crs():
     with pytest.raises(terrio.InvalidArgumentError, match="choose one with layer="):
         terrio.ZonalReducer([first, second], *args)
     assert terrio.ZonalReducer([first, second], *args, layer="second").feature_count == 2
-    with pytest.raises(terrio.InvalidArgumentError, match=r"no layer named third \(layers: first, second\)"):
+    with pytest.raises(
+        terrio.InvalidArgumentError, match=r"no layer named third \(layers: first, second\)"
+    ):
         terrio.ZonalReducer([first, second], *args, layer="third")
     # The zones have a CRS and the grid has none.
     with pytest.raises(terrio.CRSError, match="both declare a CRS"):
