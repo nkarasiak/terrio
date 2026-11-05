@@ -974,13 +974,13 @@ struct Kernel<F, M, R> {
     f: F,
     /// The value of one window as GDAL's SSE path computes it, which `process` calls for columns
     /// `1, 1 + 4, ...` in groups of four on rows free of nodata (only the GDAL 3.13 kernel's
-    /// Horn hillshade of north-up pixels with equal x and y scales on x86-64).
+    /// Horn hillshade on x86-64 when `gt[1] == -gt[5]` and the x and y scales are equal).
     multi: Option<M>,
     /// Computes columns `1..width - 1` of a row from the rows above, at and below it, and whether
     /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give,
-    /// except the default Horn hillshade of north-up pixels with equal x and y scales, whose unchecked rows give GDAL's SSE
-    /// values on x86-64 ([`HillshadeParams::same_res_row`]); `process` then recomputes the windows
-    /// holding nodata.
+    /// except the default Horn hillshade when `gt[1] == -gt[5]` and the x and y scales are equal,
+    /// whose unchecked rows give GDAL's SSE values on x86-64 ([`HillshadeParams::same_res_row`]);
+    /// `process` then recomputes the windows holding nodata.
     row: Option<R>,
 }
 
