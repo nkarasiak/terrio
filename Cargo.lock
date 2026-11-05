@@ -2777,6 +2777,7 @@ dependencies = [
  "weezl 0.2.1",
  "windows-sys 0.61.2",
  "zip 9.3.0",
+ "zlib-rs",
  "zstd 0.14.3",
  "zune-core",
  "zune-jpegxl",

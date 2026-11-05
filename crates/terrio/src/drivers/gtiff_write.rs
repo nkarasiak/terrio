@@ -168,10 +168,9 @@ fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<std::f
     std::fs::File::create(path)
 }
 
+/// A Deflate chunk as GDAL writes it: libdeflate's level 6, the same bytes.
 fn deflate(data: &[u8]) -> Result<Vec<u8>> {
-    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
-    enc.write_all(data)?;
-    Ok(enc.finish()?)
+    Ok(crate::deflate_compress::zlib_compress(data))
 }
 
 /// Encodes a chunk (little-endian samples, interleaved) as a LERC blob of `spp` values per pixel,
