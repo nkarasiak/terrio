@@ -501,13 +501,13 @@ impl HillshadeParams {
 
     /// [`Self::combined`] with arccosines and arctangents the compiler vectorizes, and whether the
     /// window must be recomputed: `cang` is within about `1e-15` of libm's, so the value can only
-    /// differ near the `cang <= 0` threshold or an `f32` midpoint.
+    /// differ near an `f32` midpoint (on either side of `cang <= 0` within that both give `1.0`).
     #[inline(always)]
     fn combined_fast<T: Px>(&self, w: &[T; 9]) -> (f32, bool) {
         let acos = |q: f64| 2.0 * fdlibm_atan_nonneg(((1.0 - q) / (1.0 + q)).sqrt());
         let cang = self.combined_cang(w, acos, fdlibm_atan_nonneg);
         let (v, redo) = f32_within(1.0 + 254.0 * cang);
-        (if cang <= 0.0 { 1.0 } else { v }, redo | (cang.abs() < 1e-12))
+        (if cang <= 0.0 { 1.0 } else { v }, redo)
     }
 
     #[inline(always)]
@@ -974,11 +974,11 @@ struct Kernel<F, M, R> {
     f: F,
     /// The value of one window as GDAL's SSE path computes it, which `process` calls for columns
     /// `1, 1 + 4, ...` in groups of four on rows free of nodata (only the GDAL 3.13 kernel's
-    /// Horn hillshade of square pixels on x86-64).
+    /// Horn hillshade of north-up pixels with equal x and y scales on x86-64).
     multi: Option<M>,
     /// Computes columns `1..width - 1` of a row from the rows above, at and below it, and whether
     /// the row is checked for nodata, giving the values `f` (and `multi` on unchecked rows) give,
-    /// except the default Horn hillshade of square pixels, whose unchecked rows give GDAL's SSE
+    /// except the default Horn hillshade of north-up pixels with equal x and y scales, whose unchecked rows give GDAL's SSE
     /// values on x86-64 ([`HillshadeParams::same_res_row`]); `process` then recomputes the windows
     /// holding nodata.
     row: Option<R>,
@@ -2685,11 +2685,28 @@ nv 10 20 30 0
         }
     }
 
+    /// Rows too narrow for a group of 16 windows, or just wide enough for one: the row kernels'
+    /// tails against the scalar kernel.
+    #[test]
+    fn narrow_rows_give_the_scalar_values() {
+        let mut seed = 11;
+        for w in [1, 2, 3, 17, 18, 19] {
+            let h = 6;
+            let mut src: Vec<f32> = (0..w * h).map(|_| (lcg(&mut seed) * 500.0) as f32).collect();
+            every_single_kernel(&src, w, h, None, &format!("width {w}"));
+            src[(h / 2) * w + w / 2] = f32::NAN;
+            every_single_kernel(&src, w, h, Some(f32::NAN), &format!("width {w} nodata"));
+        }
+    }
+
     #[test]
     fn row_kernels_give_the_scalar_values_around_nodata() {
-        let (w, h) = (53, 40);
         let mut seed = 3;
-        for nodata in [f32::NAN, -9999.0] {
+        // Also rows too narrow for a group of 4 or 16 windows, or just wide enough for one.
+        for ((w, h), nodata) in [(53, 40), (2, 9), (3, 9), (5, 9), (6, 9), (17, 9), (18, 9)]
+            .into_iter()
+            .flat_map(|size| [f32::NAN, -9999.0].map(|nd| (size, nd)))
+        {
             let mut src: Vec<f32> = (0..w * h).map(|_| (lcg(&mut seed) * 500.0) as f32).collect();
             // Scattered nodata, a run, and rows without any.
             for (i, v) in src.iter_mut().enumerate() {
@@ -2697,7 +2714,7 @@ nv 10 20 30 0
                     *v = nodata;
                 }
             }
-            src[5 * w + 10..5 * w + 30].fill(nodata);
+            src[5 * w + w / 5..5 * w + w * 3 / 5].fill(nodata);
             for edges in [false, true] {
                 let hs = HillshadeParams::new(&[0.0, 30.0, 0.0, 0.0, 0.0, -30.0], &DemOptions::default(), 1.0, 1.0);
                 let row = move |a: &[f32], b: &[f32], c: &[f32], o: &mut [f32], check: bool| hs.same_res_row(a, b, c, o, check);
@@ -2720,7 +2737,10 @@ nv 10 20 30 0
                 #[cfg(not(target_arch = "x86_64"))]
                 let multi = None::<WindowFn<f32>>;
                 let scalar = run_kernel(&src, w, h, Some(nodata), edges, &Kernel { f, multi, row: None::<RowFn<f32>> });
-                assert!(fast.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()), "hillshade, nodata {nodata}, edges {edges}");
+                assert!(
+                    fast.iter().zip(&scalar).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "hillshade width {w}, nodata {nodata}, edges {edges}"
+                );
             }
         }
     }

@@ -838,11 +838,12 @@ mod tests {
     }
 
     /// `filter` against `pixel_value` at every pixel, so the row versions give the per-pixel values:
-    /// on speckled rows (one NaN or nodata pixel in six, computed one pixel at a time) and on sparse
-    /// ones (one in 96, the row path with its nodata windows recomputed).
+    /// on speckled rows (one NaN or nodata pixel in six, computed one pixel at a time), on sparse
+    /// ones (one in 96, the row path with its nodata windows recomputed), and on grids as wide as a
+    /// 3x3, 5x5 or 9x9 kernel or one column wider.
     #[test]
     fn rows_give_the_per_pixel_values() {
-        for (w, h, every) in [(41, 23, 12), (203, 23, 192)] {
+        for (w, h, every) in [(41, 23, 12), (203, 23, 192), (3, 23, 12), (4, 23, 12), (5, 23, 12), (6, 23, 12), (9, 23, 12), (10, 23, 12)] {
             rows_match_pixels(w, h, every);
         }
     }

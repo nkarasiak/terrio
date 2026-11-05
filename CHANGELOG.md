@@ -2,42 +2,20 @@
 
 ## Unreleased
 
-- `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes its 3×3 products a row at a time, 16
-  windows at once (excepted, on rows without nodata: the default hillshade of square pixels, 4
-  windows at a time with GDAL's SSE reciprocal square root on x86-64, one at a time elsewhere, as
-  before, and the GDAL 3.13 kernel's Horn hillshade of square pixels on x86-64, which keeps GDAL's
-  SSE path), with AVX2 where `is_x86_feature_detected!` finds it at run time and the same code
-  without it on other CPUs and in WebAssembly. Rows holding nodata no longer fall back to one pixel
-  at a time, except in the GDAL 3.13 kernel's Horn hillshade of square pixels on x86-64 (its Float32
-  arithmetic): only the windows around each row's nodata are recomputed with the per-pixel code, and
-  rows of speckled nodata (more than one run per 16 pixels) are computed one pixel at a time, as
-  before. Aspect, and with the default (GDAL 3.12) kernel slope in degrees and the combined and Igor
-  hillshades, take their arctangents from fdlibm (credited in `NOTICE`, `LICENSES/SunPro.txt` and
-  the acknowledgements), and recompute with the platform's functions the few pixels whose result
-  could round differently, so the values do not change. On a 5610 x 7533 Float32 DEM, one thread:
-  slope 1.45 -> 0.27 s; the default hillshade 0.98 -> 0.33 s with its algorithm inlined, and 0.28 ->
-  0.16 s with rows in a later run; with 2 million nodata pixels / without (s): multidirectional
-  hillshade 0.42 / 0.39 -> 0.18 / 0.14, Zevenbergen-Thorne hillshade 0.31 / 0.21 -> 0.15 / 0.12,
-  Igor 1.15 / 1.06 -> 0.44 / 0.40, combined 1.06 / 0.78 -> 0.44 / 0.40, aspect 0.69 / 0.66 -> 0.26 /
-  0.23, Zevenbergen-Thorne slope 0.44 / 0.33 -> 0.20 / 0.16, slope percent 0.23 / 0.20 -> 0.13 /
-  0.10, TRI 0.22 -> 0.12, TPI 0.16 -> 0.09, roughness 0.17 -> 0.09. Outputs are bit-identical to the
-  previous build (144 products and options on four DEMs: Float32 and Int16, with and without
-  nodata), and slope (with and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all
-  42,260,130 pixels.
-- `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) computes rows
-  whole away from the edges: sums, means, minimums, maximums and standard deviations tap after tap
-  across the row (AVX2 where detected at run time), medians from the taps' ranks (up to 49 taps) and
-  modes from running counts (up to 121 taps). Edge pixels and windows holding nodata (or NaN, when a
-  nodata value is set) are recomputed per pixel, and rows of speckled nodata are computed one pixel
-  at a time, so the values are unchanged; the per-pixel median selects instead of sorting, and
-  Float32 bands are no longer copied twice. On a 5610 x 7533 DEM, one thread (GDAL 3.12's VRT
-  KernelFilteredSource in parentheses): mean 3x3 1.31 -> 0.15 s (1.38), gaussian 5x5 3.05 -> 0.23 s
-  (2.58), u 1.09 -> 0.10 s, max 3x3 1.41 -> 0.15 s (1.21), median 3x3 2.87 -> 1.23 s (5.40), and
-  mode 3x3 on a fifth of that DEM 1.23 -> 0.12 s; medians are faster at every size up to 15x15 and
-  modes up to 11x11 (larger modes keep the per-pixel path). Outputs equal GDAL's VRT for mean,
+- `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes most of its 3×3 products a row at a
+  time, with AVX2 where the CPU has it, and most rows holding nodata no longer fall back to one
+  pixel at a time. Some products take their arctangents from fdlibm (credited in `NOTICE`,
+  `LICENSES/SunPro.txt` and the acknowledgements) and recompute with the platform's functions any
+  pixel whose result could round differently. Outputs are bit-identical to the previous build (144
+  products and options on four DEMs: Float32 and Int16, with and without nodata), and slope (with
+  and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all 42,260,130 pixels. Slope
+  on a 5610 x 7533 Float32 DEM, one thread: 1.45 -> 0.27 s.
+- `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) and VRT
+  `KernelFilteredSource` reads compute focal statistics and convolutions a row at a time (medians up
+  to 49 taps, modes up to 121), with AVX2 where the CPU has it, and the per-pixel median selects
+  instead of sorting. Values are unchanged: `terrio neighbors` outputs equal GDAL's VRT for mean,
   gaussian, u, max and median, with and without nodata, and the previous build's for 20 kernels and
-  methods (40 outputs). VRT `KernelFilteredSource` reads share this filter, so they also compute
-  rows whole, with the same values.
+  methods (40 outputs). Mean 3x3 on a 5610 x 7533 DEM, one thread: 1.31 -> 0.15 s.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
