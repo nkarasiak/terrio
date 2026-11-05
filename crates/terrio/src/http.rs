@@ -400,6 +400,7 @@ struct Fetched {
 }
 
 /// Makes requests for one remote file: signing, redirects, region discovery and retries.
+#[derive(Clone)]
 struct Client {
     agent: ureq::Agent,
     options: HttpOptions,
@@ -465,6 +466,7 @@ fn redirect_refused(asked: &str, to: &str) -> Error {
     ))
 }
 
+#[derive(Clone)]
 struct S3Auth {
     creds: Option<Credentials>,
     region: Option<String>,
@@ -1801,7 +1803,7 @@ impl RangeReader {
             .collect();
         wanted.retain(|&(off, end)| !s.cached(off, end));
         wanted.sort_unstable();
-        let mut blocks = Vec::new();
+        let (mut blocks, mut runs) = (Vec::new(), Vec::new());
         let mut i = 0;
         while i < wanted.len() {
             let (start, mut end) = wanted[i];
@@ -1814,8 +1816,9 @@ impl RangeReader {
                 end = end.max(wanted[i].1);
                 i += 1;
             }
-            s.fetch_extent(start, end)?;
+            runs.push((start, end));
         }
+        s.fetch_extents(&runs)?;
         blocks.retain(|b| !s.blocks.contains_key(b));
         blocks.sort_unstable();
         blocks.dedup();
@@ -1894,17 +1897,73 @@ impl Shared {
         }
     }
 
-    /// Fetches the bytes `start..end` exactly and keeps them, here and in the process-wide cache,
-    /// the first bytes already held not asked again.
-    fn fetch_extent(&mut self, start: u64, end: u64) -> io::Result<()> {
-        let held: &[u8] = match &self.prefix {
-            Some(p) if (start as usize) < p.len() => &p[start as usize..p.len().min(end as usize)],
-            _ => &[],
+    /// Fetches the runs `start..end` exactly and keeps them, here and in the process-wide cache,
+    /// the first bytes already held not asked again. Several runs are requested at once, as
+    /// GDAL's multi-range reads send them: a window of tiles costs one round trip, not one per
+    /// run.
+    fn fetch_extents(&mut self, runs: &[(u64, u64)]) -> io::Result<()> {
+        // ponytail: one thread per run, at most MAX_PARALLEL at a time; a pool if prefetches of
+        // many runs prove frequent
+        const MAX_PARALLEL: usize = 16;
+        let held = |s: &Self, (start, end): (u64, u64)| -> Vec<u8> {
+            match &s.prefix {
+                Some(p) if (start as usize) < p.len() => p[start as usize..p.len().min(end as usize)].to_vec(),
+                _ => Vec::new(),
+            }
         };
-        let from = start + held.len() as u64;
-        let mut data = held.to_vec();
-        if from < end {
-            let fetched = self.client.fetch(Some((from, end - 1))).map_err(io::Error::other)?;
+        for group in runs.chunks(MAX_PARALLEL) {
+            let asks: Vec<(u64, u64, Vec<u8>)> = group
+                .iter()
+                .map(|&(start, end)| {
+                    let held = held(self, (start, end));
+                    (start + held.len() as u64, end, held)
+                })
+                .collect();
+            let fetched: Vec<Option<Result<Fetched>>> = if asks.iter().filter(|(from, end, _)| from < end).count() < 2 {
+                asks.iter().map(|&(from, end, _)| (from < end).then(|| self.client.fetch(Some((from, end - 1))))).collect()
+            } else {
+                let done: Vec<Option<(Option<Client>, Result<Fetched>)>> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = asks
+                        .iter()
+                        .map(|&(from, end, _)| {
+                            let mut client = self.client.clone();
+                            (from < end).then(|| {
+                                scope.spawn(move || {
+                                    let fetched = client.fetch(Some((from, end - 1)));
+                                    (Some(client), fetched)
+                                })
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| h.map(|h| h.join().unwrap_or_else(|_| (None, Err(Error::Http("a range request panicked".into()))))))
+                        .collect()
+                });
+                // What a request learned (an S3 region, a redirect's target) is kept, as a request
+                // made with `self.client` keeps it.
+                let mut fetched = Vec::with_capacity(done.len());
+                for d in done {
+                    fetched.push(d.map(|(client, result)| {
+                        if let (Some(client), Ok(_)) = (client, &result) {
+                            self.client = client;
+                        }
+                        result
+                    }));
+                }
+                fetched
+            };
+            for (&(start, _), ((from, end, held), fetched)) in group.iter().zip(asks.into_iter().zip(fetched)) {
+                self.keep_fetched(start, from, end, held, fetched)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps the run from `start` to `end`: the bytes held up to `from`, then those fetched.
+    fn keep_fetched(&mut self, start: u64, from: u64, end: u64, mut data: Vec<u8>, fetched: Option<Result<Fetched>>) -> io::Result<()> {
+        if let Some(fetched) = fetched {
+            let fetched = fetched.map_err(io::Error::other)?;
             match fetched.status {
                 206 if fetched.data.len() as u64 == end - from => data.extend_from_slice(&fetched.data),
                 200 if fetched.data.len() as u64 == self.len => {
@@ -2496,6 +2555,61 @@ mod tests {
         // Not widened to whole blocks: the byte before the exact range is fetched when read.
         assert_eq!(read_range(&mut r, 40_959, 1), data[40_959..40_960]);
         assert_eq!(count.load(Ordering::SeqCst), 5);
+    }
+
+    /// The runs of one prefetch are requested at once: the server holds each range request until
+    /// the other has arrived, which never happens when they are sent one after the other.
+    #[test]
+    fn prefetch_requests_its_runs_at_once() {
+        let data = test_data();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/data", listener.local_addr().unwrap());
+        let arrived = Arc::new((Mutex::new(0u32), std::sync::Condvar::new()));
+        let alone = Arc::new(AtomicU64::new(0));
+        let (served, waits, lonely) = (data.clone(), arrived.clone(), alone.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let (data, arrived, alone) = (served.clone(), waits.clone(), lonely.clone());
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut range = (0, 0);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                            break;
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                            let (a, b) = v.trim().split_once('-').unwrap();
+                            range = (a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap().min(data.len() - 1));
+                        }
+                    }
+                    let (a, b) = range;
+                    if a > 0 {
+                        let (count, ready) = &*arrived;
+                        let mut n = count.lock().unwrap();
+                        *n += 1;
+                        ready.notify_all();
+                        let (n, wait) = ready.wait_timeout_while(n, std::time::Duration::from_secs(5), |n| *n < 2).unwrap();
+                        drop(n);
+                        if wait.timed_out() {
+                            alone.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {a}-{b}/{}\r\nConnection: close\r\n\r\n",
+                        b - a + 1,
+                        data.len()
+                    );
+                    let _ = stream.write_all(&[head.into_bytes(), data[a..=b].to_vec()].concat());
+                });
+            }
+        });
+        let mut r = RangeReader::open_with(&Remote::Url(url), options()).unwrap();
+        r.prefetch(&[(100_000, 9000), (200_000, 9000)]).unwrap();
+        assert_eq!(alone.load(Ordering::SeqCst), 0, "the runs were requested one after the other");
+        assert_eq!(read_range(&mut r, 100_000, 9000), data[100_000..109_000]);
+        assert_eq!(read_range(&mut r, 200_000, 9000), data[200_000..209_000]);
     }
 
     /// A range fetched exactly by one reader is read by another reader of the file without a
