@@ -436,9 +436,9 @@ impl HillshadeParams {
     }
 
     /// Columns `1..width - 1` of a row (see [`Kernel::row`]): [`Self::same_res`] on rows checked
-    /// for nodata; on the others, as GDAL's SSE code path, four pixels at a time with an
-    /// approximate reciprocal square root refined by one Newton-Raphson step, the last columns
-    /// with [`Self::same_res`].
+    /// for nodata; on the others, on x86-64, as GDAL's SSE code path, four pixels at a time with
+    /// an approximate reciprocal square root refined by one Newton-Raphson step, the last columns
+    /// with [`Self::same_res`] (elsewhere every column, as GDAL without SSE).
     fn same_res_row<T: Px>(&self, l1: &[T], l2: &[T], l3: &[T], o: &mut [f32], check: bool) {
         #[cfg(target_arch = "x86_64")]
         if std::arch::is_x86_feature_detected!("avx2") {
@@ -2670,6 +2670,12 @@ nv 10 20 30 0
                 }
             }
             src[5 * w + 10..5 * w + 30].fill(nodata);
+            if !nodata.is_nan() {
+                // NaN beside a finite nodata value is a value: its windows stay on the row path.
+                for i in [12 * w + 3, 25 * w + 40, 26 * w + 41, 38 * w + 52] {
+                    src[i] = f32::NAN;
+                }
+            }
             every_single_kernel(&src, w, h, Some(nodata), &format!("f32 nodata {nodata}"));
             let ints: Vec<i32> = src.iter().map(|&v| if v.is_nan() { -9999 } else { v as i32 }).collect();
             every_single_kernel(&ints, w, h, Some(-9999), "i32 nodata");
