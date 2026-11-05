@@ -139,6 +139,7 @@ def _burn(
     transform: Affine,
     all_touched: bool,
     add: bool,
+    ot: str = "Int64",
 ) -> np.ndarray:
     """Burns geometries with terrio, in pixel space.
 
@@ -149,9 +150,10 @@ def _burn(
         transform: The grid's transform.
         all_touched: Burn every pixel a geometry touches.
         add: Add values instead of replacing them.
+        ot: The burnt type without `add`: `"Int64"` for feature numbers, `"Byte"` for coverage.
 
     Returns:
-        numpy.ndarray: The burnt values, float64 (for `add`) or int64.
+        numpy.ndarray: The burnt values, float64 (for `add`) or of type `ot`.
     """
     h, w = shape
     north_up = transform.b == 0 and transform.d == 0 and transform.a > 0 and transform.e < 0
@@ -175,7 +177,7 @@ def _burn(
         {"type": "FeatureCollection", "features": feats},
         attribute="v",
         like=like,
-        ot="Float64" if add else "Int64",
+        ot="Float64" if add else ot,
         init=0,
         all_touched=all_touched,
         add=add,
@@ -316,15 +318,22 @@ def rasterize(
         shape = (out.shape[-2], out.shape[-1])
         if merge_alg == MergeAlg.add:
             sums = _burn(geoms, [float(v) for v in values], shape, transform, all_touched, True)
-            touched = (
-                _burn(geoms, list(range(1, len(geoms) + 1)), shape, transform, all_touched, False)
-                > 0
-            )
+            ones = [1] * len(geoms)
+            touched = _burn(geoms, ones, shape, transform, all_touched, False, ot="Byte") > 0
             out[touched] = (out[touched].astype(np.float64) + sums[touched]).astype(out.dtype)
         else:
-            idx = _burn(geoms, list(range(1, len(geoms) + 1)), shape, transform, all_touched, False)
-            hit = idx > 0
-            out[hit] = _burn_values(values, out.dtype)[idx[hit] - 1]
+            burnt = _burn_values(values, out.dtype)
+            if (burnt == burnt[0]).all():
+                # One value (masks, `default_value`): burn the coverage as bytes, not as feature
+                # numbers (a raster 8 times smaller) gathered back into values.
+                ones = [1] * len(geoms)
+                hit = _burn(geoms, ones, shape, transform, all_touched, False, ot="Byte") > 0
+                out[hit] = burnt[0]
+            else:
+                numbers = list(range(1, len(geoms) + 1))
+                idx = _burn(geoms, numbers, shape, transform, all_touched, False)
+                hit = idx > 0
+                out[hit] = burnt[idx[hit] - 1]
     if writer is not None:
         writer.write(out, 1)
         if not isinstance(dst_path, type(writer)) or dst_path is not writer:
