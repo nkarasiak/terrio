@@ -387,7 +387,15 @@ def reduce_windows(reducer, arr, nodata=None, prepare=lambda a: a):
 @pytest.mark.parametrize("all_touched", [False, True])
 @pytest.mark.parametrize(
     "dtype, nodata",
-    [("uint16", 0), ("uint16", None), ("int16", 0), ("float32", np.nan), ("float64", np.nan)],
+    [
+        ("uint8", 0),
+        ("int8", 0),
+        ("uint16", 0),
+        ("uint16", None),
+        ("int16", 0),
+        ("float32", np.nan),
+        ("float64", np.nan),
+    ],
 )
 def test_zonal_reducer_matches_zonal_stats(dtype, nodata, all_touched):
     arr = reducer_array(dtype)

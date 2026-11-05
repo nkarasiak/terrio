@@ -105,7 +105,8 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: u
         .zones
         .iter()
         .flat_map(|zone| {
-            let pixels = zone.spans.iter().map(|s| s.len as usize).sum::<usize>().min(per_zone) as i64;
+            // Summed in 64 bits: a zone can cover more than 2^32 pixels of a 32-bit target's grid.
+            let pixels = zone.spans.iter().map(|s| u64::from(s.len)).sum::<u64>().min(per_zone as u64) as i64;
             [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
         })
         .collect();
@@ -343,7 +344,8 @@ struct Accumulator {
     summary: Summary,
     weighted: Summary,
     invalid_weight: bool,
-    /// Values, kept when a statistic needs them sorted.
+    /// Values, kept when a statistic needs them binned: all of them, or with a histogram those it
+    /// does not count.
     values: Vec<f64>,
     /// Their coverages, in fractional mode (binary coverage is 1).
     coverages: Vec<f64>,
@@ -780,8 +782,10 @@ mod tests {
         assert_eq!(bits(&[0.0, -0.0])[0], 0.0f64.to_bits());
         let got = bits(&[0.0, 5.0, -0.0, 0.0, -0.0]);
         assert_eq!(got, [0.0f64.to_bits(), (-0.0f64).to_bits(), (-0.0f64).to_bits(), 5.0f64.to_bits(), 2]);
-        // A tie for minority keeps the first value, -0: two -0 and two 0 against two 5.
-        assert_eq!(bits(&[5.0, -0.0, 0.0, 5.0])[3], (-0.0f64).to_bits());
+        // -0 and 0 (two values) against two 5: a mode tie takes the larger, 5, a minority tie the
+        // smaller, -0.
+        let tie = bits(&[5.0, -0.0, 0.0, 5.0]);
+        assert_eq!((tie[2], tie[3]), (5.0f64.to_bits(), (-0.0f64).to_bits()));
     }
 
     #[test]
