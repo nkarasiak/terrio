@@ -1148,7 +1148,9 @@ where
         }
         let win_at = |j: usize| [l1[j - 1], l1[j], l1[j + 1], l2[j - 1], l2[j], l2[j + 1], l3[j - 1], l3[j], l3[j + 1]];
         let mut j = 1;
-        if let Some(row) = &k.row {
+        // Rows of speckled nodata go one pixel at a time (`window::dirty_runs`).
+        let dense = check && [i - 1, i, i + 1].iter().any(|&r| nd_runs.get(r - s0).is_some_and(|runs| super::window::is_dense(runs, w)));
+        if let Some(row) = k.row.as_ref().filter(|_| !dense) {
             row(l1, l2, l3, o, check);
             if check {
                 // The windows with nodata, from the nodata runs of the three rows.

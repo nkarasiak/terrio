@@ -333,7 +333,9 @@ pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nod
         crate::par::chunks_mut(&mut output, width.max(1), |y, row| {
             let mut scratch = Scratch::default();
             let mut pixel = |x: usize| pixel_value(src, width, height, k, nodata, (separable, axis), x, y, &mut scratch);
-            if rows && y >= ry && y + ry < height && width > 2 * rx {
+            // Rows of speckled nodata go one pixel at a time (`window::dirty_runs`).
+            let dense = || runs[y - ry..=y + ry].iter().any(|r| super::window::is_dense(r, width));
+            if rows && y >= ry && y + ry < height && width > 2 * rx && (runs.is_empty() || !dense()) {
                 taps_row(src, width, y, rx, &taps, k, nodata.unwrap_or(0.0), &mut row[rx..width - rx]);
                 let windows = match runs.is_empty() {
                     true => Vec::new(),

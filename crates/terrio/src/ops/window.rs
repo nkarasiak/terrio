@@ -6,9 +6,13 @@
 //! are found from each row's runs of such values ([`dirty_runs`], once per row) and recomputed
 //! with the operation's per-pixel code ([`dirty_windows`]).
 
-/// The runs `start..end` of the values of `row` that `dirty` flags.
+/// The runs `start..end` of the values of `row` that `dirty` flags; the whole row, `[(0, len)]`
+/// ([`is_dense`]), once they number more than one per [`DENSE`] values: a row that speckled is
+/// computed one pixel at a time, which the fast path and its fix-ups would not beat, and its runs
+/// are not kept.
 pub(crate) fn dirty_runs<T: Copy>(row: &[T], dirty: impl Fn(T) -> bool) -> Vec<(usize, usize)> {
     const CHUNK: usize = 64;
+    let most = row.len() / DENSE;
     let mut runs: Vec<(usize, usize)> = Vec::new();
     for (c, chunk) in row.chunks(CHUNK).enumerate() {
         // Most chunks have no flagged value: a test without branches, which vectorizes, skips them.
@@ -20,12 +24,25 @@ pub(crate) fn dirty_runs<T: Copy>(row: &[T], dirty: impl Fn(T) -> bool) -> Vec<(
                 let j = c * CHUNK + j;
                 match runs.last_mut() {
                     Some(run) if run.1 == j => run.1 = j + 1,
-                    _ => runs.push((j, j + 1)),
+                    _ => {
+                        if runs.len() >= most {
+                            return vec![(0, row.len())];
+                        }
+                        runs.push((j, j + 1));
+                    }
                 }
             }
         }
     }
     runs
+}
+
+/// Values per run past which [`dirty_runs`] gives a row as a whole.
+const DENSE: usize = 16;
+
+/// Whether `runs` cover a whole row of `width` values: compute it one pixel at a time.
+pub(crate) fn is_dense(runs: &[(usize, usize)], width: usize) -> bool {
+    runs == [(0, width)]
 }
 
 /// The columns `start..end` (sorted, disjoint, within `0..width`) whose window, `rx` columns
@@ -46,6 +63,17 @@ pub(crate) fn dirty_windows<'a>(runs: impl IntoIterator<Item = &'a [(usize, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row with more than one run per `DENSE` values is given whole, so it is computed one pixel
+    /// at a time and its runs are not kept.
+    #[test]
+    fn speckled_rows_are_given_whole() {
+        let speckled: Vec<f32> = (0..160).map(|i| if i % 2 == 0 { f32::NAN } else { 1.0 }).collect();
+        assert_eq!(dirty_runs(&speckled, f32::is_nan), vec![(0, 160)]);
+        assert!(is_dense(&dirty_runs(&speckled, f32::is_nan), 160));
+        let ten: Vec<f32> = (0..160).map(|i| if i % 16 == 0 { f32::NAN } else { 1.0 }).collect();
+        assert_eq!(dirty_runs(&ten, f32::is_nan).len(), 10);
+    }
 
     #[test]
     fn runs_and_the_windows_they_reach() {
