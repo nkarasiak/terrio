@@ -19,10 +19,11 @@
   files (`.prj` and `.aux.xml` sidecars, GRIB2, MBTiles, PMTiles and Zarr are still truncated).
   The file stays the same file: a symlink is written through, it keeps its permissions, and its
   hard links and readers holding it open see the new content; a shorter output drops the old
-  tail. A write that fails partway through leaves the file empty rather than holding part of the
-  new one; one that fails while encoding, before the file is opened, leaves it as it was, and a
-  GeoTIFF's last header update and the sidecars come after the data file is finished, so their
-  failure leaves the new data. A path that is not a regular file (a device such as `/dev/null`,
+  tail. The file's first 16 bytes, where the formats put their signature, are zeroed at once and
+  written last, so a write interrupted partway (the process killed, the disk full) leaves no file
+  that opens as a raster of old and new bytes, and one that fails with an error leaves it empty;
+  one that fails while encoding, before the file is opened, leaves it as it was, and a sidecar
+  failing after its data file is finished leaves the new data. A path that is not a regular file (a device such as `/dev/null`,
   a FIFO) is written as before, without truncation.
   Rewriting a 170 MB GeoTIFF eight times takes a steady 0.22 s each, where truncating took 0.07
   to 0.8 s with stalls; a 170 MB Float32 raster written eight times over the same path takes

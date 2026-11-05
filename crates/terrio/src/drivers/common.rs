@@ -863,11 +863,23 @@ pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\
 /// kernel to finish writing back the old pages, which stalls a write replacing a file written
 /// moments before; the file (its permissions, links and open handles) stays the same. A path that
 /// is not a regular file (`/dev/null`, a FIFO) is written as it was before, with no truncation.
+///
+/// The file's first [`HEAD`] bytes, where every format puts its signature (TIFF, BigTIFF, PNG,
+/// SQLite), are zeroed at once and written last, by [`Rewrite::finish`]: a write interrupted before
+/// (the process killed, the disk full) leaves no file that opens as a raster of old and new bytes.
 pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
-    let regular = file.metadata()?.is_file();
-    Ok(Rewrite { file, regular, finished: false })
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    let meta = file.metadata()?;
+    let regular = meta.is_file();
+    if regular && meta.len() > 0 {
+        file.write_all(&[0; HEAD][..HEAD.min(meta.len() as usize)])?;
+    }
+    Ok(Rewrite { file, regular, finished: false, head: [0; HEAD], head_len: 0, pos: 0, synced: false })
 }
+
+/// The leading bytes [`Rewrite`] holds back until [`Rewrite::finish`].
+const HEAD: usize = 16;
 
 /// A file being written over ([`create_replacing`]). Dropped before [`Self::finish`] (a failed
 /// write), a regular file is emptied, so no mix of new and old bytes is left that could read as a
@@ -877,18 +889,35 @@ pub(crate) struct Rewrite {
     /// A regular file, which can be cut to length; a device or a FIFO cannot.
     regular: bool,
     finished: bool,
+    /// The bytes written at offsets below [`HEAD`], written to the file by [`Self::finish`].
+    head: [u8; HEAD],
+    head_len: usize,
+    /// The writer's position.
+    pos: u64,
+    /// Whether the file's own position is `pos` (not after a write or a seek within the head).
+    synced: bool,
 }
 
 impl Rewrite {
-    /// Ends the file at the current position, dropping what remains of the previous file.
+    /// Ends the file at the current position, dropping what remains of the previous file, and
+    /// writes its first bytes.
     pub(crate) fn finish(&mut self) -> std::io::Result<()> {
-        use std::io::Seek;
-        if self.regular {
-            let end = self.file.stream_position()?;
+        use std::io::{Seek, SeekFrom, Write};
+        if self.regular && !self.finished {
+            let end = self.pos;
+            self.file.seek(SeekFrom::Start(0))?;
+            self.file.write_all(&self.head[..self.head_len])?;
             self.file.set_len(end)?;
+            self.file.seek(SeekFrom::Start(end))?;
+            self.synced = true;
         }
         self.finished = true;
         Ok(())
+    }
+
+    /// Whether writes go to the file as they come: a device or FIFO, or a finished file.
+    fn direct(&self) -> bool {
+        !self.regular || self.finished
     }
 }
 
@@ -902,10 +931,23 @@ impl Drop for Rewrite {
 
 impl std::io::Write for Rewrite {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(buf)
+        use std::io::{Seek, SeekFrom};
+        if !self.direct() && self.pos < HEAD as u64 {
+            let at = self.pos as usize;
+            let n = buf.len().min(HEAD - at);
+            self.head[at..at + n].copy_from_slice(&buf[..n]);
+            self.head_len = self.head_len.max(at + n);
+            self.pos += n as u64;
+            self.synced = false;
+            return Ok(n);
+        }
+        if !self.direct() && !self.synced {
+            self.file.seek(SeekFrom::Start(self.pos))?;
+            self.synced = true;
+        }
+        let n = self.file.write(buf)?;
+        self.pos += n as u64;
+        Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
@@ -914,7 +956,21 @@ impl std::io::Write for Rewrite {
 
 impl std::io::Seek for Rewrite {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
+        use std::io::SeekFrom;
+        let to = match pos {
+            _ if self.direct() => self.file.seek(pos)?,
+            SeekFrom::Start(n) => n,
+            SeekFrom::Current(d) => self
+                .pos
+                .checked_add_signed(d)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before the start"))?,
+            SeekFrom::End(_) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "seek from the end of a file being written over"));
+            }
+        };
+        self.pos = to;
+        self.synced = self.direct();
+        Ok(to)
     }
 }
 
@@ -929,6 +985,29 @@ pub(crate) fn write_replacing(path: impl AsRef<std::path::Path>, bytes: impl AsR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Until finished, a file written over holds zeros where its signature goes, so an interrupted
+    /// write leaves nothing that opens as a raster; a patch of the header lands in the held bytes.
+    #[test]
+    fn a_rewrite_writes_its_signature_last() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.tif");
+        std::fs::write(&path, [b"II*\0".as_slice(), &[7u8; 60]].concat()).unwrap();
+        let mut w = create_replacing(&path).unwrap();
+        w.write_all(b"II*\0\0\0\0\0").unwrap();
+        w.write_all(&[1u8; 24]).unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(&on_disk[..HEAD], &[0u8; HEAD]);
+        assert_eq!(&on_disk[HEAD..32], &[1u8; 16]);
+        w.seek(SeekFrom::Start(4)).unwrap();
+        w.write_all(&[9, 0, 0, 0]).unwrap();
+        w.seek(SeekFrom::Start(32)).unwrap();
+        w.finish().unwrap();
+        let mut want = b"II*\0\x09\0\0\0".to_vec();
+        want.extend([1u8; 24]);
+        assert_eq!(std::fs::read(&path).unwrap(), want);
+    }
 
     /// A device is written over as before, with no truncation to fail on.
     #[cfg(unix)]

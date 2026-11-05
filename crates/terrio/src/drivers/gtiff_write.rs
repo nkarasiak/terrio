@@ -2304,11 +2304,11 @@ impl TiffRows {
             }
             self.file.write_all(&encode_ifd(&mt, second, 0, self.big))?;
         }
-        // The first directory's offset, in the header.
+        // The first directory's offset, in the header, which `finish` writes last: until then
+        // the file is no TIFF.
         let mut file = self.file.into_inner().map_err(|e| Error::Io(e.into_error()))?;
-        // The header's directory offset is written last: until then the file is no TIFF.
-        file.finish()?;
         use std::io::{Seek, SeekFrom};
+        let end = file.stream_position()?;
         if self.big {
             file.seek(SeekFrom::Start(8))?;
             file.write_all(&first.to_le_bytes())?;
@@ -2316,7 +2316,8 @@ impl TiffRows {
             file.seek(SeekFrom::Start(4))?;
             file.write_all(&(first as u32).to_le_bytes())?;
         }
-        file.flush()?;
+        file.seek(SeekFrom::Start(end))?;
+        file.finish()?;
         Ok(())
     }
 }
