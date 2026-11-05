@@ -203,7 +203,7 @@ impl StreamState {
         let bands = self.nodata.len();
         while self.next < zones.len() && zones[self.next].row_start < r1 {
             // Saturated on a 32-bit target: an 8- or 16-bit zone that big still gets a histogram,
-            // and `Accumulator::new` skips a list reservation it cannot make.
+            // and `Accumulator::new` reserves no lists past `isize::MAX` bytes.
             let pixels = if plan.keep_values { usize::try_from(zones[self.next].pixels()).unwrap_or(usize::MAX) } else { 0 };
             let data_type = self.data_type.unwrap_or(strip.data_type);
             self.open.push((self.next, 0, (0..bands).map(|_| Accumulator::new(plan, pixels, data_type)).collect()));
@@ -434,7 +434,8 @@ fn radix_sort(keys: &mut Vec<u32>) {
 
 impl Accumulator {
     /// For a zone of `pixels` pixels of a band of `data_type`: a histogram when it has at least as
-    /// many pixels as an 8- or 16-bit type has values, else lists reserved for its pixels.
+    /// many pixels as an 8- or 16-bit type has values, else lists reserved for its pixels (none
+    /// past `isize::MAX` bytes).
     fn new(plan: &Plan<'_>, pixels: usize, data_type: DataType) -> Self {
         if !plan.keep_values {
             return Self::default();
@@ -442,14 +443,15 @@ impl Accumulator {
         if let Some((first, bins)) = histogram_range(data_type).filter(|r| pixels >= r.1) {
             return Self { histogram: Some(Box::new(Histogram { first, weights: vec![0.0; bins] })), ..Self::default() };
         }
-        // Reserved exactly, so a large zone's lists don't grow by doubling; a reservation that
-        // overflows `isize` (`pixels` saturated on a 32-bit target) or fails is left to the pushes.
-        let mut acc = Self::default();
-        let _ = acc.values.try_reserve_exact(pixels);
-        if plan.fractional {
-            let _ = acc.coverages.try_reserve_exact(pixels);
+        // Reserved exactly, so a large zone's lists don't grow by doubling. A count past
+        // `isize::MAX` bytes (`pixels` saturated on a 32-bit target), where `Vec::with_capacity`
+        // would panic, is left to the pushes; an allocation the allocator refuses still aborts.
+        let reserved = if pixels <= isize::MAX as usize / std::mem::size_of::<f64>() { pixels } else { 0 };
+        Self {
+            values: Vec::with_capacity(reserved),
+            coverages: Vec::with_capacity(if plan.fractional { reserved } else { 0 }),
+            ..Self::default()
         }
-        acc
     }
 
     #[allow(clippy::too_many_arguments)]
