@@ -2,27 +2,29 @@
 
 ## Unreleased
 
-- Remote files read over HTTP(S) share one connection pool for the whole process, keeping up to
-  64 idle connections (ureq keeps 3 per host by default), so reads from many threads reuse warm
-  connections and TLS sessions. Each open or read outside the operations that already shared one
-  (a recursive upload, deletion or listing) built a new client and paid a TCP and TLS handshake,
-  about 0.4 s at a 180 ms round trip. The pool holds one set of settings at a time and is rebuilt
-  when the timeout, connect timeout, user agent or proxy variables change, and in a forked child:
-  clients made there build their own pool and never close the parent's connections (clients
-  opened before the fork still share them, as their own agents did before). Opening a STAC item set of 10
-  Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s instead of 27.2 s read eagerly,
-  and 6.7 s instead of 8.1 s read in chunks (one run each; the network varies between runs).
-- GeoTIFF: little-endian Deflate tiles and strips of integer samples, with or without the
-  horizontal predictor, and of floating-point samples without a predictor (Float16 and YCbCr
-  excepted) are decoded by terrio rather than the `tiff` crate: inflated in one call straight
-  into the result with `fdeflate` (pure Rust, a new direct dependency already in the tree through
-  `png`), then the predictor undone as a running sum. A stream ending before the chunk's samples,
-  or with a wrong Adler-32, is an error; one cut in its trailer after the samples is read, as
-  libtiff's zlib decoder reads it (libtiff built with libdeflate refuses it). All 121 tiles of a Sentinel-2 L2A band (Deflate, predictor 2), edge tiles
-  included, decode as the crate decodes them. Inflated in one call (with zlib-rs, the first step),
-  a 1024 x 1024 uint16 tile took 5.7-5.8 ms instead of 6.9-7.1 ms through the crate; `fdeflate`
-  then inflates one in 4.7 ms against zlib-rs's 5.4 ms (decoder only) and reads the 10 bands of a
-  Sentinel-2 date whole on one thread in 5.8 s against 6.24 s with zlib-rs, the same pixels.
+- Remote files read over HTTP(S) share one connection pool for the whole process, keeping up to 64
+  idle connections (ureq keeps 3 per host by default), so files opened from many threads reuse warm
+  connections and TLS sessions. Outside the operations that already shared a client (the /vsi file
+  operations, recursive uploads, deletions and listings), each remote file opened its own client,
+  with 3 idle connections per host, and paid a TCP and TLS handshake, about 0.4 s at a 180 ms round
+  trip. The pool holds one set of settings at a time and is rebuilt when the timeout, connect
+  timeout, user agent or proxy variables change, and in a forked child: clients made there build
+  their own pool and never close the parent's connections (clients opened before the fork still
+  share them, as their own agents did before). Opening a STAC item set of 10 Sentinel-2 dates x 4
+  bands over https on 32 threads took 18.6 s instead of 27.2 s read eagerly, and 6.7 s instead of
+  8.1 s read in chunks (one run each; the network varies between runs).
+- GeoTIFF: little-endian Deflate tiles and strips of integer samples, with or without the horizontal
+  predictor, and of floating-point samples without a predictor (Float16 and YCbCr excepted) are
+  decoded by terrio rather than the `tiff` crate: inflated in one call straight into the result with
+  `fdeflate` (pure Rust, a new direct dependency already in the tree through `png`), then the
+  predictor undone as a running sum. A stream ending before the chunk's samples, or with a wrong
+  Adler-32, is an error; one cut in its trailer after the samples is read, as libtiff's zlib decoder
+  reads it (libtiff built with libdeflate refuses it). All 121 tiles of a Sentinel-2 L2A band
+  (Deflate, predictor 2), edge tiles included, decode as the crate decodes them. Inflated in one
+  call (with zlib-rs, the first step), a 1024 x 1024 uint16 tile took 5.7-5.8 ms instead of 6.9-7.1
+  ms through the crate; `fdeflate` then inflates one in 4.7 ms against zlib-rs's 5.4 ms (decoder
+  only) and reads the 10 bands of a Sentinel-2 date whole on one thread in 5.8 s against 6.24 s with
+  zlib-rs, the same pixels.
 - Warps run one row loop per kernel (nearest, bilinear, cubic, the general kernel), store
   nearest values as they are when the working type is the output type, compute the general
   kernel's column weights once per pixel (up to 64 columns) and its reach once per chunk, fold
