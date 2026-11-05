@@ -497,9 +497,9 @@ const ndvi = stream.finish(); // { mean: Float64Array, median: Float64Array }, o
 `finish()` returns an object of one `Float64Array` per statistic, keyed by its name, NaN where a
 zone has no valid pixels (`count` and `variety` are then 0). Statistics that keep values (median,
 quantiles, mode, minority, variety) hold each open zone's values in each stream, 8 bytes per pixel
-(16 with `fractional`), at most 256 or 65,536 of them in a stream fed only 8- or 16-bit integer
-arrays (a histogram of 2 or 512 KiB counts the rest): feed streams one at a time to bound them. It
-also takes `allTouched`, `fractional`, `layer` and `stripRows`; weighted statistics need
+(16 with `fractional`): feed streams one at a time to bound them. In a stream fed only 8- or 16-bit
+integer arrays, a zone of at least 256 or 65,536 pixels counts them in a histogram of 2 or 512 KiB
+instead. It also takes `allTouched`, `fractional`, `layer` and `stripRows`; weighted statistics need
 `zonalStats`.
 
 ## Native multidimensional arrays
