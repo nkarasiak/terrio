@@ -3,18 +3,18 @@
 ## Unreleased
 
 - Zonal statistics that keep values (median, quantiles, mode, minority, variety) count a zone's
-  values of an 8- or 16-bit integer band in a histogram (2 or 512 KiB) once it has as many as
-  the type has (256 or 65,536), so those values are no longer sorted or held; smaller zones'
-  integer values are sorted by radix without `fractional`. Bands of such rasters are then
-  reduced together rather than one per pass. The median of each of 10 UInt16 bands (10980 x
-  10980, DEFLATE, 32 threads) over one zone covering the tile takes 5.3 s, 11.6 s of CPU and
-  1.07 GB, down from 24.1 s, 70 s and 2.88 GB (0.7.0: 47.8 s, 47 s and 5.34 GB); over 10,000
-  fields of about 5,000 pixels, 2.2 s, 20 s of CPU and 1.0 GB, down from 2.3 s, 25 s and
-  1.03 GB (0.7.0: 18.6 s, 41 s and 2.58 GB). Without `fractional`, results are unchanged. With
-  it, a zone counted in a histogram sums its coverages in another order, so their rounding can
-  change its quantiles in the last digits, or which of two values whose coverage sums tie within
-  rounding is its mode or minority; on both benchmarks, with mode, minority, quantiles and
-  variety, it changed no value and outputs are byte for byte the same.
+  values of an 8- or 16-bit integer band in a histogram (2 or 512 KiB) once it has as many as the
+  type has (256 or 65,536), so those values are no longer sorted or held. Without `fractional`, a
+  zone of 256 values or more that are all integers of such types, whatever the band's type, is
+  sorted by radix. Bands of 8- and 16-bit rasters are then reduced together rather than one per
+  pass. The median of each of 10 UInt16 bands (10980 x 10980, DEFLATE, 32 threads) over one zone
+  covering the tile takes 5.3 s, 11.6 s of CPU and 1.07 GB, down from 24.1 s, 70 s and 2.88 GB
+  (0.7.0: 47.8 s, 47 s and 5.34 GB); over 10,000 fields of about 5,000 pixels, 2.2 s, 20 s of CPU
+  and 1.0 GB, down from 2.3 s, 25 s and 1.03 GB (0.7.0: 18.6 s, 41 s and 2.58 GB). Without
+  `fractional`, results are unchanged. With it, a zone counted in a histogram sums its coverages in
+  another order, so their rounding can change its quantiles in the last digits, or which of two
+  values whose coverage sums tie within rounding is its mode or minority; on both benchmarks, with
+  mode, minority, quantiles and variety, it changed no value and outputs are byte for byte the same.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).

@@ -206,16 +206,17 @@ impl StreamState {
         while self.next < zones.len() && zones[self.next].row_start < r1 {
             // Value lists hold at most the zone's pixels, or as many as a histogram has bins:
             // reserved once.
-            let range = histogram_range(self.data_type.unwrap_or(strip.data_type)).filter(|_| plan.keep_values);
+            let counted_type =
+                Some(self.data_type.unwrap_or(strip.data_type)).filter(|&t| plan.keep_values && histogram_range(t).is_some());
             let pixels = if plan.keep_values {
-                zones[self.next].spans.iter().map(|s| s.len as usize).sum::<usize>().min(range.map_or(usize::MAX, |r| r.1))
+                zones[self.next].spans.iter().map(|s| s.len as usize).sum::<usize>().min(counted_type.map_or(usize::MAX, values_per_zone))
             } else {
                 0
             };
             let accumulator = || Accumulator {
                 values: Vec::with_capacity(pixels),
                 coverages: Vec::with_capacity(if plan.fractional { pixels } else { 0 }),
-                range,
+                counted_type,
                 ..Default::default()
             };
             self.open.push((self.next, 0, (0..bands).map(|_| accumulator()).collect()));
@@ -361,12 +362,18 @@ struct Accumulator {
     values: Vec<f64>,
     /// Their coverages, in fractional mode (binary coverage is 1).
     coverages: Vec<f64>,
-    /// The integers a histogram counts for this band ([`histogram_range`]), if any.
-    range: Option<(f64, usize)>,
-    /// Once the lists hold as many values as `range` has integers, the weight (pixel count, or
-    /// coverage sum in fractional mode) of each of them: it takes the values it counts from then
-    /// on, the lists only the others (-0, fractions, values out of range). Empty until then.
-    histogram: Vec<f64>,
+    /// The 8- or 16-bit sample type whose values a histogram counts ([`histogram_range`]), if any.
+    counted_type: Option<DataType>,
+    /// Once the lists hold as many values as that type has, a histogram of them: it takes the
+    /// values it counts from then on, the lists only the others (-0, fractions, values out of
+    /// range). Boxed, so that accumulators without one, most of them, stay small.
+    histogram: Option<Box<Histogram>>,
+}
+
+/// The weight (pixel count, or coverage sum in fractional mode) of each integer from `first`.
+struct Histogram {
+    first: f64,
+    weights: Vec<f64>,
 }
 
 /// The integers a histogram counts for a band of `data_type`, every value of an 8- or 16-bit
@@ -403,8 +410,9 @@ const RADIX_KEYS: usize = 98_304;
 
 /// `values` as `(value, count)` bins of identical values (-0 apart from 0) in `total_cmp` order.
 fn counts(mut values: Vec<f64>) -> Vec<(f64, f64)> {
-    // Integers of 8- or 16-bit types, as 17-bit keys sorted by radix: faster than comparing.
-    if values.iter().all(|&v| bin(v, RADIX_FIRST, RADIX_KEYS).is_some()) {
+    // Integers of 8- or 16-bit types, as 17-bit keys sorted by radix: faster than comparing, but
+    // for a few values, which its fixed passes over 512 digits would outweigh.
+    if values.len() >= 256 && values.iter().all(|&v| bin(v, RADIX_FIRST, RADIX_KEYS).is_some()) {
         let mut keys: Vec<u32> = values.iter().map(|&v| (v - RADIX_FIRST) as u32).collect();
         drop(values);
         radix_sort(&mut keys);
@@ -481,19 +489,18 @@ impl Accumulator {
         }
         self.summary.add(v, coverage, plan.moments);
         if plan.keep_values {
-            if !self.histogram.is_empty()
-                && let Some((first, bins)) = self.range
-                && let Some(bin) = bin(v, first, bins)
+            if let Some(h) = &mut self.histogram
+                && let Some(bin) = bin(v, h.first, h.weights.len())
             {
-                self.histogram[bin] += if plan.fractional { coverage } else { 1.0 };
+                h.weights[bin] += if plan.fractional { coverage } else { 1.0 };
                 return true;
             }
             self.values.push(v);
             if plan.fractional {
                 self.coverages.push(coverage);
             }
-            if self.histogram.is_empty()
-                && let Some((first, bins)) = self.range
+            if self.histogram.is_none()
+                && let Some((first, bins)) = self.counted_type.and_then(histogram_range)
                 && self.values.len() >= bins
             {
                 self.start_histogram(first, bins, plan.fractional);
@@ -523,7 +530,7 @@ impl Accumulator {
         self.values.shrink_to_fit();
         self.coverages.truncate(kept);
         self.coverages.shrink_to_fit();
-        self.histogram = histogram;
+        self.histogram = Some(Box::new(Histogram { first, weights: histogram }));
     }
 
     /// The kept values as `(value, weight)` bins in `total_cmp` order; the lists and histogram are
@@ -540,12 +547,12 @@ impl Accumulator {
         } else {
             counts(values)
         };
-        let histogram = std::mem::take(&mut self.histogram);
-        let Some((first, _)) = self.range.filter(|_| !histogram.is_empty()) else { return listed };
+        let Some(histogram) = self.histogram.take() else { return listed };
+        let Histogram { first, weights } = *histogram;
         // The listed values are those the histogram does not count: -0 at most is equal to one.
         let mut listed = listed.into_iter().peekable();
         let mut bins = Vec::new();
-        for (i, &weight) in histogram.iter().enumerate().filter(|b| *b.1 > 0.0) {
+        for (i, &weight) in weights.iter().enumerate().filter(|b| *b.1 > 0.0) {
             let v = first + i as f64;
             bins.extend(std::iter::from_fn(|| listed.next_if(|l| l.0.total_cmp(&v).is_lt())));
             match bins.last_mut() {
@@ -884,7 +891,7 @@ mod tests {
     /// started: values it does not count (-0, fractions, out of range) stay listed.
     #[test]
     fn histogram_keeps_listing_values_it_does_not_count() {
-        use super::{Accumulator, histogram_range};
+        use super::Accumulator;
         let stats: Vec<Statistic> = ["median", "quantile_0", "quantile_25", "quantile_99", "quantile_100", "mode", "minority", "variety"]
             .iter()
             .map(|s| Statistic::parse(s).unwrap())
@@ -893,14 +900,14 @@ mod tests {
         for fractional in [false, true] {
             let plan = Plan::new(&stats, fractional, &[0]);
             let coverage = |i: usize| if fractional { [1.0, 0.25, 0.5, 0.125][i % 4] } else { 1.0 };
-            let range = histogram_range(DataType::U16);
-            let (mut counted, mut listed) = (Accumulator { range, ..Default::default() }, Accumulator::default());
-            for i in 0..range.unwrap().1 + 1000 {
+            let (mut counted, mut listed) =
+                (Accumulator { counted_type: Some(DataType::U16), ..Default::default() }, Accumulator::default());
+            for i in 0..65_536 + 1000 {
                 let v = ((i * i) % 1000) as f64;
                 counted.add_value(v, None, DataType::U16, coverage(i), &plan);
                 listed.add_value(v, None, DataType::F64, coverage(i), &plan);
             }
-            assert!(!counted.histogram.is_empty() && listed.histogram.is_empty());
+            assert!(counted.histogram.is_some() && listed.histogram.is_none());
             for (i, &v) in others.iter().enumerate() {
                 counted.add_value(v, None, DataType::F64, coverage(i), &plan);
                 listed.add_value(v, None, DataType::F64, coverage(i), &plan);
@@ -913,7 +920,7 @@ mod tests {
         for fractional in [false, true] {
             let plan = Plan::new(&stats, fractional, &[0]);
             let (mut counted, mut listed) =
-                (Accumulator { range: histogram_range(DataType::U16), ..Default::default() }, Accumulator::default());
+                (Accumulator { counted_type: Some(DataType::U16), ..Default::default() }, Accumulator::default());
             for (i, v) in (0..70_000u64).map(|i| ((i * i) % 1000) as f64).chain(others).enumerate() {
                 let coverage = if fractional { [1.0, 0.25, 0.5, 0.125][i % 4] } else { 1.0 };
                 counted.add_value(v, None, DataType::U16, coverage, &plan);
