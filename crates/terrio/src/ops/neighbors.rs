@@ -892,7 +892,7 @@ mod tests {
                         normalized,
                         function,
                     };
-                    for nodata in [None, Some(-9999.0f32)] {
+                    for nodata in [None, Some(-9999.0f32), Some(f32::NAN)] {
                         let got = filter(&src, w, h, &k, nodata);
                         // The per-pixel values, pass after pass.
                         let separable = k.coefs.len() == k.size && k.size != 1;
