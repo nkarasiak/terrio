@@ -2561,7 +2561,8 @@ class ZonalStream:
     def add(self, window: int, array: NDArray[Any]) -> None:
         """Add window number ``window``, in order.
 
-        A 2-D array of shape ``(height, width)``, of any numeric dtype and strides.
+        A 2-D integer, float32, float64 or bool array of shape ``(height, width)``, of
+        any strides.
         """
         ...
     def finish(self) -> dict[str, NDArray[Any]]:

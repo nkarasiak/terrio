@@ -364,8 +364,8 @@ impl PyZonalStream {
 
 #[pymethods]
 impl PyZonalStream {
-    /// Adds window number `window` (of `ZonalReducer.windows`): a 2-D array of shape
-    /// `(height, width)`, of any numeric dtype and strides. Windows must come in order.
+    /// Adds window number `window` (of `ZonalReducer.windows`): a 2-D integer, float32, float64 or
+    /// bool array of shape `(height, width)`, of any strides. Windows must come in order.
     fn add(&self, py: Python<'_>, window: usize, array: &Bound<'_, numpy::PyUntypedArray>) -> PyResult<()> {
         let mut guard = self.lock()?;
         let stream = guard.as_mut().ok_or_else(|| crate::invalid("the stream is finished"))?;

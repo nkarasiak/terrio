@@ -468,6 +468,9 @@ def test_zonal_reducer_errors():
     assert f"({h}, {w})" in str(e.value) and f"({h}, {w + 1})" in str(e.value)
     with pytest.raises(terrio.InvalidArgumentError, match=r"expected \(h, w\)"):
         stream.add(0, np.zeros(h * w))
+    for dtype in (np.float16, np.complex64):
+        with pytest.raises(terrio.InvalidArgumentError, match="unsupported array dtype"):
+            stream.add(0, np.zeros((h, w), dtype))
     with pytest.raises(terrio.InvalidArgumentError, match="expected window 0"):
         stream.add(1, np.zeros((h1, w1)))
     stream.add(0, np.zeros((h, w)))
