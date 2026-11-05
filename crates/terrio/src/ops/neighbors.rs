@@ -294,7 +294,7 @@ pub(crate) fn kernels(o: &NeighborsOptions) -> Result<Vec<Kernel>> {
 /// Away from the edges, rows are computed whole ([`taps_row`]), and the windows holding nodata or
 /// NaN (with a nodata value) recomputed with [`pixel_value`]: the same values, as each pixel's
 /// arithmetic keeps its order. Medians over more than 49 taps, modes over more than 121, rows
-/// reaching speckled nodata ([`super::window::is_dense`]) and grids no wider than the kernel are
+/// reaching speckled nodata ([`super::window::is_dense`]) and grids narrower than the kernel are
 /// computed one pixel at a time.
 // Arithmetic and axis ordering follow GDAL's VRTKernelFilteredSource::FilterData
 // (frmts/vrt/vrtfilters.cpp, MIT; attribution in NOTICE).
