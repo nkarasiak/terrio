@@ -19,6 +19,7 @@
 //! layout: the IFDs first, then the image data from the smallest overview to the full resolution,
 //! with GDAL's structural metadata, block leaders and trailers.
 
+use super::common::{Rewrite, create_replacing};
 use super::gdal_overview::{self, Method};
 use crate::pixel::{Pixel, map_data, with_data};
 use crate::{Error, Result};
@@ -155,59 +156,6 @@ impl Compression {
 #[cfg(not(feature = "lerc"))]
 fn lerc_encode(_data: &[u8], _c: &ChunkInfo, _max_z_error: f64) -> Result<Vec<u8>> {
     Err(Error::disabled("lerc"))
-}
-
-/// Opens the file `path` for writing, creating it, without truncating a file already there: the
-/// writer overwrites it and ends it with [`Rewrite::finish`]. Truncating first would wait for the
-/// kernel to finish writing back the old pages, which stalls a write replacing a file written
-/// moments before; the file (its permissions, links and open handles) stays the same.
-fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
-    Ok(Rewrite { file, finished: false })
-}
-
-/// A file being written over ([`create_replacing`]). Dropped before [`Self::finish`] (a failed
-/// write), it is emptied, so no mix of new and old bytes is left that could read as a GeoTIFF.
-struct Rewrite {
-    file: std::fs::File,
-    finished: bool,
-}
-
-impl Rewrite {
-    /// Ends the file at the current position, dropping what remains of the previous file.
-    fn finish(&mut self) -> std::io::Result<()> {
-        use std::io::Seek;
-        let end = self.file.stream_position()?;
-        self.file.set_len(end)?;
-        self.finished = true;
-        Ok(())
-    }
-}
-
-impl Drop for Rewrite {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = self.file.set_len(0);
-        }
-    }
-}
-
-impl Write for Rewrite {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-impl std::io::Seek for Rewrite {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
-    }
 }
 
 /// A Deflate chunk as GDAL writes it: libdeflate's level 6, the same bytes.
@@ -3026,23 +2974,6 @@ fn directories(mut images: Vec<Directory>, big: bool, cog: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_rewrite_dropped_unfinished_is_emptied() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("old.tif");
-        std::fs::write(&path, vec![7u8; 1000]).unwrap();
-        let mut rewrite = create_replacing(&path).unwrap();
-        rewrite.write_all(b"new").unwrap();
-        drop(rewrite);
-        assert_eq!(std::fs::read(&path).unwrap(), b"");
-        std::fs::write(&path, vec![7u8; 1000]).unwrap();
-        let mut rewrite = create_replacing(&path).unwrap();
-        rewrite.write_all(b"new").unwrap();
-        rewrite.finish().unwrap();
-        drop(rewrite);
-        assert_eq!(std::fs::read(&path).unwrap(), b"new");
-    }
 
     /// Writing over a larger file gives the file a fresh write gives, through every writer, and
     /// keeps the file itself (a hard link to it sees the new content).

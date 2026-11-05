@@ -858,9 +858,88 @@ pub(crate) const NO_GEOTRANSFORM: [f64; 6] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 /// the geolocation arrays of swaths.
 pub(crate) const WGS84_LAT_LONG_WKT: &str = "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AXIS[\"Latitude\",NORTH],AXIS[\"Longitude\",EAST],AUTHORITY[\"EPSG\",\"4326\"]]";
 
+/// Opens the file `path` for writing, creating it, without truncating a file already there: the
+/// writer overwrites it and ends it with [`Rewrite::finish`]. Truncating first would wait for the
+/// kernel to finish writing back the old pages, which stalls a write replacing a file written
+/// moments before; the file (its permissions, links and open handles) stays the same.
+pub(crate) fn create_replacing(path: impl AsRef<std::path::Path>) -> std::io::Result<Rewrite> {
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    Ok(Rewrite { file, finished: false })
+}
+
+/// A file being written over ([`create_replacing`]). Dropped before [`Self::finish`] (a failed
+/// write), it is emptied, so no mix of new and old bytes is left that could read as a raster.
+pub(crate) struct Rewrite {
+    file: std::fs::File,
+    finished: bool,
+}
+
+impl Rewrite {
+    /// Ends the file at the current position, dropping what remains of the previous file.
+    pub(crate) fn finish(&mut self) -> std::io::Result<()> {
+        use std::io::Seek;
+        let end = self.file.stream_position()?;
+        self.file.set_len(end)?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for Rewrite {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.file.set_len(0);
+        }
+    }
+}
+
+impl std::io::Write for Rewrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for Rewrite {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+/// [`std::fs::write`] through [`create_replacing`]: `bytes` written over the file at `path`.
+pub(crate) fn write_replacing(path: impl AsRef<std::path::Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = create_replacing(path)?;
+    file.write_all(bytes.as_ref())?;
+    file.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rewrite_dropped_unfinished_is_emptied() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.tif");
+        std::fs::write(&path, vec![7u8; 1000]).unwrap();
+        let mut rewrite = create_replacing(&path).unwrap();
+        rewrite.write_all(b"new").unwrap();
+        drop(rewrite);
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        std::fs::write(&path, vec![7u8; 1000]).unwrap();
+        let mut rewrite = create_replacing(&path).unwrap();
+        rewrite.write_all(b"new").unwrap();
+        rewrite.finish().unwrap();
+        drop(rewrite);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
 
     #[test]
     fn pam_nodata_preserves_dataset_fallback_and_other_xml() {
