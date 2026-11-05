@@ -105,8 +105,7 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: u
         .zones
         .iter()
         .flat_map(|zone| {
-            // Summed in 64 bits: a zone can cover more than 2^32 pixels of a 32-bit target's grid.
-            let pixels = zone.spans.iter().map(|s| u64::from(s.len)).sum::<u64>().min(per_zone as u64) as i64;
+            let pixels = zone.pixels().min(per_zone as u64) as i64;
             [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
         })
         .collect();
@@ -203,13 +202,9 @@ impl StreamState {
         let r1 = r0 + height;
         let bands = self.nodata.len();
         while self.next < zones.len() && zones[self.next].row_start < r1 {
-            // Summed in 64 bits and saturated: a zone can cover more than 2^32 pixels of a 32-bit
-            // target's grid, and then gets a histogram all the same.
-            let pixels = if plan.keep_values {
-                usize::try_from(zones[self.next].spans.iter().map(|s| u64::from(s.len)).sum::<u64>()).unwrap_or(usize::MAX)
-            } else {
-                0
-            };
+            // Saturated on a 32-bit target: an 8- or 16-bit zone that big still gets a histogram,
+            // and `Accumulator::new` skips a list reservation it cannot make.
+            let pixels = if plan.keep_values { usize::try_from(zones[self.next].pixels()).unwrap_or(usize::MAX) } else { 0 };
             let data_type = self.data_type.unwrap_or(strip.data_type);
             self.open.push((self.next, 0, (0..bands).map(|_| Accumulator::new(plan, pixels, data_type)).collect()));
             self.next += 1;
@@ -447,11 +442,14 @@ impl Accumulator {
         if let Some((first, bins)) = histogram_range(data_type).filter(|r| pixels >= r.1) {
             return Self { histogram: Some(Box::new(Histogram { first, weights: vec![0.0; bins] })), ..Self::default() };
         }
-        Self {
-            values: Vec::with_capacity(pixels),
-            coverages: Vec::with_capacity(if plan.fractional { pixels } else { 0 }),
-            ..Self::default()
+        // Reserved exactly, so a large zone's lists don't grow by doubling; a reservation that
+        // overflows `isize` (`pixels` saturated on a 32-bit target) or fails is left to the pushes.
+        let mut acc = Self::default();
+        let _ = acc.values.try_reserve_exact(pixels);
+        if plan.fractional {
+            let _ = acc.coverages.try_reserve_exact(pixels);
         }
+        acc
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -495,6 +493,9 @@ impl Accumulator {
         if !(v.is_finite() && crate::histogram::is_valid(v, nodata, data_type)) {
             return false;
         }
+        // The histogram drops zero-weight bins, which the lists keep: they agree as `spans` never
+        // gives a coverage of 0.
+        debug_assert!(coverage > 0.0);
         self.summary.add(v, coverage, plan.moments);
         if plan.keep_values {
             if let Some(h) = &mut self.histogram
