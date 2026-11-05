@@ -719,10 +719,10 @@ impl ZonalReducer {
     /// - [`Error::InvalidArgument`] for no statistics, a duplicate or weighted statistic, a
     ///   quantile outside 0-100, `fractional` with `all_touched`, `strip_rows` of 0, a grid
     ///   without pixels, over `u32::MAX` rows or columns, or with a non-finite or non-invertible
-    ///   geotransform, or a zone that is not a polygon or has non-finite coordinates.
-    /// - [`Error::Crs`] when only one of the zones and the grid has a CRS, or a zone cannot be
-    ///   reprojected into the grid's.
-    /// - Any error rasterizing a zone, such as an invalid geometry with `fractional`.
+    ///   geotransform, or a zone that is not a polygon, has non-finite coordinates, or cannot be
+    ///   reprojected or rasterized (such as an invalid geometry with `fractional`), naming it.
+    /// - [`Error::Crs`] when only one of the zones and the grid has a CRS, or the zones' CRS
+    ///   cannot be transformed into the grid's.
     pub fn new(zones: &Layer, grid: Grid, options: &ZonalOptions, strip_rows: Option<usize>) -> Result<Self> {
         if options.fractional && options.all_touched {
             return Err(Error::InvalidArgument("fractional coverage and all_touched are mutually exclusive".into()));

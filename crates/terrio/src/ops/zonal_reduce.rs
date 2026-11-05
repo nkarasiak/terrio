@@ -64,23 +64,30 @@ impl<'a> Plan<'a> {
 /// zone pixels, over the rows and columns of the pixels in it. Strips without zone pixels, such
 /// as those between the parts of a multipolygon, are left out.
 pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window> {
-    let Some((first, end)) = strip_range(index, strip_rows) else { return Vec::new() };
-    // Per strip: (first row, end row, first column, end column) of its zone pixels.
-    let mut extents: Vec<Option<(usize, usize, usize, usize)>> = vec![None; end - first];
-    for span in index.zones.iter().flat_map(|z| &z.spans) {
-        let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
-        let e = extents[row / strip_rows - first].get_or_insert((row, row + 1, col, end));
-        *e = (e.0.min(row), e.1.max(row + 1), e.2.min(col), e.3.max(end));
+    // (strip, first row, end row, first column, end column) of the zone pixels in a strip, an
+    // entry per zone and strip it crosses, merged by strip: memory follows the zones, not the
+    // rows of the grid between them.
+    let mut parts: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for zone in &index.zones {
+        let zone_parts = parts.len();
+        for span in &zone.spans {
+            let (row, col, end) = (span.row as usize, span.col as usize, (span.col + span.len) as usize);
+            match parts[zone_parts..].last_mut() {
+                // A zone's spans are in row-major order: its strips come one after another.
+                Some(p) if p.0 == row / strip_rows => *p = (p.0, p.1.min(row), p.2.max(row + 1), p.3.min(col), p.4.max(end)),
+                _ => parts.push((row / strip_rows, row, row + 1, col, end)),
+            }
+        }
     }
-    extents.into_iter().flatten().map(|(r0, r1, c0, c1)| Window::new(c0, r0, c1 - c0, r1 - r0)).collect()
-}
-
-/// The strips of `strip_rows` rows from the zones' first row to their last, as `first..end`, or
-/// none without zones: counted over the zones, as a grid can be far taller than they are.
-fn strip_range(index: &ZoneIndex, strip_rows: usize) -> Option<(usize, usize)> {
-    let first = index.zones.iter().map(|z| z.row_start).min()?;
-    let end = index.zones.iter().map(|z| z.row_end).max()?;
-    Some((first / strip_rows, end.div_ceil(strip_rows)))
+    parts.sort_unstable_by_key(|p| p.0);
+    parts
+        .chunk_by(|a, b| a.0 == b.0)
+        .map(|strip| {
+            let (r0, r1, c0, c1) =
+                strip.iter().fold((usize::MAX, 0, usize::MAX, 0), |e, p| (e.0.min(p.1), e.1.max(p.2), e.2.min(p.3), e.3.max(p.4)));
+            Window::new(c0, r0, c1 - c0, r1 - r0)
+        })
+        .collect()
 }
 
 /// The most pixels of the zones open at once while strips of `strip_rows` rows are reduced: what
@@ -88,18 +95,21 @@ fn strip_range(index: &ZoneIndex, strip_rows: usize) -> Option<(usize, usize)> {
 /// first row and finishes it after the strip of its last.
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize) -> usize {
     let strip_rows = strip_rows.max(1);
-    let Some((first, end)) = strip_range(index, strip_rows) else { return 0 };
-    let mut change = vec![0i64; end - first + 1];
-    for zone in &index.zones {
-        let pixels: i64 = zone.spans.iter().map(|s| i64::from(s.len)).sum();
-        change[zone.row_start / strip_rows - first] += pixels;
-        change[(zone.row_end - 1) / strip_rows + 1 - first] -= pixels;
-    }
-    let mut open = 0i64;
-    change
+    // (strip, change in open pixels): two per zone, so memory follows the zones, not the grid.
+    let mut changes: Vec<(usize, i64)> = index
+        .zones
         .iter()
-        .map(|c| {
-            open += c;
+        .flat_map(|zone| {
+            let pixels: i64 = zone.spans.iter().map(|s| i64::from(s.len)).sum();
+            [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
+        })
+        .collect();
+    changes.sort_unstable_by_key(|c| c.0);
+    let mut open = 0i64;
+    changes
+        .chunk_by(|a, b| a.0 == b.0)
+        .map(|strip| {
+            open += strip.iter().map(|c| c.1).sum::<i64>();
             open
         })
         .max()
@@ -534,8 +544,8 @@ mod tests {
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10), 100);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones[..2].to_vec() }, 10), 48);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: Vec::new() }, 10), 0);
-        // Counted over the zones' strips, not the grid's: here from row 4e9.
-        assert_eq!(open_pixels_peak(&ZoneIndex { zones: vec![zone(4_000_000_000, 4_000_000_002, 3)] }, 1), 6);
+        // Counted over the zones, not the rows between them: here rows 0 and 4e9.
+        assert_eq!(open_pixels_peak(&ZoneIndex { zones: vec![zone(0, 1, 5), zone(4_000_000_000, 4_000_000_002, 3)] }, 1), 6);
     }
     use crate::ops::zonal::Statistic;
     use crate::vector::Coord;
@@ -566,12 +576,15 @@ mod tests {
             [Window::new(5, 0, 3, 10), Window::new(1, 300, 2, 10), Window::new(9, 1500, 31, 10), Window::new(0, 1599, 1, 1)]
         );
         assert!(strip_windows(&ZoneIndex { zones: vec![] }, 256).is_empty());
-        // Strips are counted over the zones' rows, not the grid's: here from row 4e9.
-        let index = ZoneIndex { zones: vec![zone(block(4_000_000_007, 3, 2, 4).collect())] };
+        // Memory follows the zones, not the rows between them: zones at rows 0 and 4e9.
+        let index = ZoneIndex { zones: vec![zone(block(0, 1, 1, 1).collect()), zone(block(4_000_000_007, 2, 2, 4).collect())] };
         assert_eq!(
             strip_windows(&index, 1),
-            [Window::new(2, 4_000_000_007, 4, 1), Window::new(2, 4_000_000_008, 4, 1), Window::new(2, 4_000_000_009, 4, 1)]
+            [Window::new(1, 0, 1, 1), Window::new(2, 4_000_000_007, 4, 1), Window::new(2, 4_000_000_008, 4, 1)]
         );
+        // Zones sharing a strip give one window over both.
+        let index = ZoneIndex { zones: vec![zone(block(0, 2, 1, 1).collect()), zone(block(1, 2, 5, 3).collect())] };
+        assert_eq!(strip_windows(&index, 256), [Window::new(1, 0, 7, 3)]);
     }
 
     #[test]

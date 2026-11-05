@@ -313,15 +313,7 @@ impl JsZonalReducer {
     ) -> Result<JsZonalReducer, JsError> {
         use terrio::ops::rasterize::Grid;
         use terrio::ops::zonal::{Statistic, ZonalOptions, ZonalReducer};
-        // As numbers, not usize: wasm-bindgen would wrap -1 to 4294967295 and truncate 300.7.
-        let size = |name: &str, v: f64| {
-            if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) {
-                Ok(v as usize)
-            } else {
-                Err(JsError::new(&format!("{name} must be a whole number of pixels, at most {}", u32::MAX)))
-            }
-        };
-        let (width, height) = (size("width", width)?, size("height", height)?);
+        let (width, height) = (whole("width", width)?, whole("height", height)?);
         let a: ReducerOptions = parse_options(&options)?;
         let geo_transform: [f64; 6] =
             transform.try_into().map_err(|_| JsError::new("transform must be a GDAL geotransform of 6 numbers"))?;
@@ -337,7 +329,12 @@ impl JsZonalReducer {
                 layers.drain(..).find(|l| &l.name == name).ok_or_else(|| JsError::new(&format!("no zone layer named '{name}'")))?
             }
             None if layers.len() == 1 => layers.remove(0),
-            None => return Err(JsError::new(&format!("the zones have {} layers: choose one with the layer option", layers.len()))),
+            None => {
+                return Err(JsError::new(&format!(
+                    "the zones must have one layer, or name one with the layer option (they have {})",
+                    layers.len()
+                )));
+            }
         };
         let options = ZonalOptions { fractional: a.fractional, stats, all_touched: a.all_touched, ..Default::default() };
         let crs = crs.as_deref().map(terrio::crs::SpatialRef::parse).transpose().map_err(js_err)?.unwrap_or_default();
@@ -375,6 +372,16 @@ impl JsZonalReducer {
     }
 }
 
+/// `v` as a count, taken as a number rather than a usize: wasm-bindgen would wrap -1 to
+/// 4294967295 and truncate 300.7.
+fn whole(name: &str, v: f64) -> Result<usize, JsError> {
+    if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) {
+        Ok(v as usize)
+    } else {
+        Err(JsError::new(&format!("{name} must be a whole number from 0 to {}", u32::MAX)))
+    }
+}
+
 /// One band reduced by a `ZonalReducer`: `add` each window's pixels in order, then `finish`.
 #[wasm_bindgen(js_name = ZonalStream)]
 pub struct JsZonalStream {
@@ -386,7 +393,8 @@ pub struct JsZonalStream {
 impl JsZonalStream {
     /// Adds window number `window` (of `ZonalReducer.windows()`): a typed array of its
     /// `width * height` pixels, row after row. Windows must come in order.
-    pub fn add(&mut self, window: usize, data: &JsValue) -> Result<(), JsError> {
+    pub fn add(&mut self, window: f64, data: &JsValue) -> Result<(), JsError> {
+        let window = whole("window", window)?;
         let stream = self.stream.as_mut().ok_or_else(|| JsError::new("the stream is finished"))?;
         stream.add(window, &crate::raster_data(data)?).map_err(js_err)
     }

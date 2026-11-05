@@ -478,7 +478,9 @@ in `stats` for a second aligned weighting raster; see the
 
 `ZonalReducer` gives the results of `zonalStats` for arrays you compute yourself, a strip at a
 time, without building a raster first. Zones are computed once for the grid; `windows()` lists
-the `[x, y, width, height]` strips that hold zone pixels (`stripRows` rows each), and `stream()`
+the `[x, y, width, height]` strips that hold zone pixels (`stripRows` rows each: by default
+terrio's strip size for one float64 band of this width; give a tiled source's block height to
+read each block once), and `stream()`
 reduces one band fed those strips in order, as typed arrays of `width * height` pixels, row after
 row:
 
@@ -496,7 +498,7 @@ const ndvi = stream.finish(); // { mean: Float64Array, median: Float64Array }, o
 zone has no valid pixels (`count` and `variety` are then 0). Statistics that keep values (median,
 quantiles, mode, minority, variety) hold each open zone's values in each stream, 8 bytes per
 pixel (16 with `fractional`): feed streams one at a time to bound them. It also takes
-`allTouched`, `fractional` and `layer`; weighted statistics need `zonalStats`.
+`allTouched`, `fractional`, `layer` and `stripRows`; weighted statistics need `zonalStats`.
 
 ## Native multidimensional arrays
 
