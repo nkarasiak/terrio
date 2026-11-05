@@ -53,9 +53,9 @@ origin = "existing"
 reason = "NullSafeAllocator, a GlobalAlloc forwarding to the system allocator: the unsafe impl, its 4 unsafe fns and their 4 blocks"
 
 [files."crates/terrio/src/ops/dem.rs"]
-count = 2
+count = 5
 origin = "existing"
-reason = "SSE reciprocal square root intrinsics, part of the x86-64 baseline; the second from #265, an SSE intrinsic in DEM operations"
+reason = "SSE reciprocal square root intrinsics, part of the x86-64 baseline (the second from #265), and three calls of AVX2 row loops after is_x86_feature_detected!"
 
 [files."crates/terrio/src/ops/zonal.rs"]
 count = 1
@@ -101,3 +101,8 @@ reason = "A worker's reference to the leaked thread channel, by its address"
 count = 2
 origin = "existing"
 reason = "The Arrow C stream and C data interfaces: arrays and streams moved out of PyCapsules"
+
+[files."crates/terrio/src/ops/neighbors.rs"]
+count = 1
+origin = "added"
+reason = "A call of the AVX2 row loop of focal taps after is_x86_feature_detected!"
