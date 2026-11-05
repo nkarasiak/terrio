@@ -575,12 +575,12 @@ pub fn zonal_stats_with(
         let mut weight_raster = weights.map(|w| w.lock().map(|mut r| r.shared())).transpose()?;
         let zone_index = grids[grid].1.as_ref().expect("built above");
         // Statistics that keep values hold every open zone's values for each band reduced at once:
-        // of an 8- or 16-bit band, at most `values_per_zone` (a histogram counts the rest; a zone
-        // holds both while it switches, which `open_pixels_peak` counts). Bands
-        // are reduced in groups whose values take at most `VALUES_PER_PASS` (one band at a time
-        // when one band's take more), so that a zone covering a whole multi-band float raster
-        // holds one band's values, as 0.7.0 did. Each further pass reads the raster again. Passes
-        // of all sources share the budget (`hold_values`).
+        // of an 8- or 16-bit band, at most `values_per_zone`, a histogram counting the rest
+        // (`open_pixels_peak` counts both, held while a zone switches). Bands are reduced in
+        // groups whose values take at most `VALUES_PER_PASS` (one band at a time when one band's
+        // take more), so that a zone covering a whole multi-band float raster holds one band's
+        // values, as 0.7.0 did. Each further pass reads the raster again. Passes of all sources
+        // share the budget (`hold_values`).
         // Values per band at the strip height of a pass of `n` bands (strips of fewer bands are
         // taller); the largest group that fits, or one band.
         let per_band = |n: usize| match plan.value_bytes_per_pixel() {
@@ -669,7 +669,7 @@ fn release_freed_memory() {
 /// zones are computed once for the grid, then each [`ZonalReducer::stream`] reduces one band.
 /// Cloning shares the zones. Statistics that keep values (median, quantiles, mode, minority,
 /// variety) hold each open zone's values in each stream, 8 bytes per pixel (16 with fractional
-/// coverage), at most 256 or 65,536 of them in a stream fed 8- or 16-bit integer data (a
+/// coverage), at most 256 or 65,536 of them in a stream fed only 8- or 16-bit integer data (a
 /// histogram of 2 or 512 KiB counts the rest), outside `zonal_stats`' shared budget: feed streams
 /// one at a time to bound them.
 ///

@@ -95,7 +95,7 @@ pub(super) fn strip_windows(index: &ZoneIndex, strip_rows: usize) -> Vec<Window>
 
 /// The most pixels of the zones open at once while strips of `strip_rows` rows are reduced: what
 /// each band's value lists hold at their peak, as `reduce_source` opens a zone at the strip of its
-/// first row and finishes it after the strip of its last. A zone of more than `per_zone` pixels
+/// first row and finishes it after the strip of its last. A zone of `per_zone` pixels or more
 /// ([`values_per_zone`]) counts twice `per_zone`: its list and histogram, held together while it
 /// switches to the histogram.
 pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: usize) -> usize {
@@ -106,7 +106,8 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: u
         .iter()
         .flat_map(|zone| {
             let pixels = zone.spans.iter().map(|s| s.len as usize).sum::<usize>();
-            let pixels = if pixels > per_zone { per_zone.saturating_mul(2) } else { pixels } as i64;
+            let pixels = if pixels >= per_zone { per_zone.saturating_mul(2) } else { pixels };
+            let pixels = pixels as i64;
             [(zone.row_start / strip_rows, pixels), ((zone.row_end - 1) / strip_rows + 1, -pixels)]
         })
         .collect();
@@ -275,16 +276,7 @@ impl StreamState {
                     .iter_mut()
                     .map(|acc| {
                         let bins = if plan.keep_values { acc.bins(plan.fractional) } else { Vec::new() };
-                        let ranks: Vec<f64> = if plan.ranks {
-                            bins.iter()
-                                .scan(0.0, |n, b| {
-                                    *n += b.1;
-                                    Some(*n)
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
+                        let ranks = if plan.ranks { ranks(&bins) } else { Vec::new() };
                         plan.stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect::<Vec<_>>()
                     })
                     .collect();
@@ -404,27 +396,27 @@ fn bin(v: f64, first: f64, bins: usize) -> Option<usize> {
     (bin < bins && (first + bin as f64).to_bits() == v.to_bits()).then_some(bin)
 }
 
-/// The integers radix-sorted keys stand for, from `KEYS_FIRST`: every value of an 8- or 16-bit
+/// The integers radix-sorted keys stand for, from `RADIX_FIRST`: every value of an 8- or 16-bit
 /// integer type.
-const KEYS_FIRST: f64 = -32_768.0;
-const KEYS: usize = 98_304;
+const RADIX_FIRST: f64 = -32_768.0;
+const RADIX_KEYS: usize = 98_304;
 
 /// `values` as `(value, count)` bins of identical values (-0 apart from 0) in `total_cmp` order.
 fn counts(mut values: Vec<f64>) -> Vec<(f64, f64)> {
     // Integers of 8- or 16-bit types, as 17-bit keys sorted by radix: faster than comparing.
-    if values.iter().all(|&v| bin(v, KEYS_FIRST, KEYS).is_some()) {
-        let mut keys: Vec<u32> = values.iter().map(|&v| (v - KEYS_FIRST) as u32).collect();
+    if values.iter().all(|&v| bin(v, RADIX_FIRST, RADIX_KEYS).is_some()) {
+        let mut keys: Vec<u32> = values.iter().map(|&v| (v - RADIX_FIRST) as u32).collect();
         drop(values);
         radix_sort(&mut keys);
-        return keys.chunk_by(|a, b| a == b).map(|run| (KEYS_FIRST + f64::from(run[0]), run.len() as f64)).collect();
+        return keys.chunk_by(|a, b| a == b).map(|run| (RADIX_FIRST + f64::from(run[0]), run.len() as f64)).collect();
     }
     values.sort_unstable_by(f64::total_cmp);
     values.chunk_by(|a, b| a.to_bits() == b.to_bits()).map(|run| (run[0], run.len() as f64)).collect()
 }
 
-/// Sorts keys below 2^17 (`KEYS`): a least-significant-digit radix sort of 9 then 8 bits.
+/// Sorts keys below 2^17 (`RADIX_KEYS`): a least-significant-digit radix sort of 9 then 8 bits.
 fn radix_sort(keys: &mut Vec<u32>) {
-    const _: () = assert!(KEYS <= 1 << 17);
+    const _: () = assert!(RADIX_KEYS <= 1 << 17);
     let mut sorted = vec![0u32; keys.len()];
     for (shift, bits) in [(0, 9), (9, 8)] {
         let digit = |k: u32| ((k >> shift) & ((1 << bits) - 1)) as usize;
@@ -544,14 +536,7 @@ impl Accumulator {
         let listed: Vec<(f64, f64)> = if fractional {
             let mut pairs: Vec<(f64, f64)> = values.into_iter().zip(std::mem::take(&mut self.coverages)).collect();
             pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-            let mut bins: Vec<(f64, f64)> = Vec::new();
-            for (v, coverage) in pairs {
-                match bins.last_mut() {
-                    Some(last) if last.0 == v => last.1 += coverage,
-                    _ => bins.push((v, coverage)),
-                }
-            }
-            bins
+            merged(&pairs).collect()
         } else {
             counts(values)
         };
@@ -662,6 +647,16 @@ impl Summary {
     }
 }
 
+/// The cumulative weights of `bins`: in binary mode, the rank after each bin's last value.
+fn ranks(bins: &[(f64, f64)]) -> Vec<f64> {
+    bins.iter()
+        .scan(0.0, |n, b| {
+            *n += b.1;
+            Some(*n)
+        })
+        .collect()
+}
+
 /// Bins of equal values (-0 with 0) merged, value of the first, weights summed.
 fn merged(bins: &[(f64, f64)]) -> impl Iterator<Item = (f64, f64)> + '_ {
     bins.chunk_by(|a, b| a.0 == b.0).map(|run| (run[0].0, run.iter().map(|b| b.1).sum()))
@@ -711,9 +706,10 @@ mod tests {
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, usize::MAX), 100);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones[..2].to_vec() }, 10, usize::MAX), 48);
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: Vec::new() }, 10, usize::MAX), 0);
-        // A zone over `per_zone` pixels counts twice `per_zone` (list and histogram): 40 + 18
-        // together in strip 1, 40 alone in strip 4.
+        // A zone of `per_zone` pixels or more counts twice `per_zone` (list and histogram): 40 +
+        // 18 together in strip 1, 40 alone in strip 4; at 18, 36 + 36 in strip 1.
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, 20), 58);
+        assert_eq!(open_pixels_peak(&ZoneIndex { zones: zones.clone() }, 10, 18), 72);
         // Counted over the zones, not the rows between them: here rows 0 and 4e9.
         assert_eq!(open_pixels_peak(&ZoneIndex { zones: vec![zone(0, 1, 5), zone(4_000_000_000, 4_000_000_002, 3)] }, 1, usize::MAX), 6);
     }
@@ -769,13 +765,7 @@ mod tests {
     /// The statistics of `acc` as a finished zone computes them.
     fn finish(acc: &mut super::Accumulator, plan: &Plan<'_>, stats: &[Statistic], fractional: bool) -> Vec<crate::FieldValue> {
         let bins = acc.bins(fractional);
-        let ranks: Vec<f64> = bins
-            .iter()
-            .scan(0.0, |n, b| {
-                *n += b.1;
-                Some(*n)
-            })
-            .collect();
+        let ranks = super::ranks(&bins);
         stats.iter().map(|&stat| acc.stat(stat, plan, &bins, &ranks)).collect()
     }
 
