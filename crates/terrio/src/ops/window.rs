@@ -60,6 +60,35 @@ pub(crate) fn dirty_windows<'a>(runs: impl IntoIterator<Item = &'a [(usize, usiz
     merged
 }
 
+/// `avx2_rows! { fn name[generics](args) { body } }` defines `fn name<generics>(args)`, which runs
+/// `body` compiled for AVX2 when `is_x86_feature_detected!` finds it at run time (x86-64), and as
+/// it is elsewhere. Both copies are the same source: the same IEEE operations (Rust contracts no
+/// FMA), so the same values; only the vectors the compiler chooses differ. The body cannot name
+/// `Self`, and every generic parameter must appear in an argument's type.
+macro_rules! avx2_rows {
+    ($(#[$attr:meta])* fn $name:ident[$($generics:tt)*]($($arg:ident: $ty:ty),* $(,)?) $body:block) => {
+        $(#[$attr])*
+        fn $name<$($generics)*>($($arg: $ty),*) {
+            #[inline(always)]
+            fn body<$($generics)*>($($arg: $ty),*) $body
+
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2")]
+            fn avx2<$($generics)*>($($arg: $ty),*) {
+                body($($arg),*)
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            if std::arch::is_x86_feature_detected!("avx2") {
+                // SAFETY: the CPU has AVX2, the one feature `avx2` is compiled for.
+                return unsafe { avx2($($arg),*) };
+            }
+            body($($arg),*)
+        }
+    };
+}
+pub(crate) use avx2_rows;
+
 #[cfg(test)]
 mod tests {
     use super::*;

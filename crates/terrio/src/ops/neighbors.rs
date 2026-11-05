@@ -25,6 +25,7 @@
 //! `equal` (any odd size); explicit matrices are written `[[a,b,c],[d,e,f],[g,h,i]]`, row by row.
 
 use super::Grid;
+use super::window::avx2_rows;
 use crate::{Error, LazyRaster, RasterDataset, Result, Window, WindowOptions};
 use wbraster::DataType;
 use wbraster::raster::RasterData;
@@ -299,29 +300,14 @@ pub(crate) fn kernels(o: &NeighborsOptions) -> Result<Vec<Kernel>> {
 // Arithmetic and axis ordering follow GDAL's VRTKernelFilteredSource::FilterData
 // (frmts/vrt/vrtfilters.cpp, MIT; attribution in NOTICE).
 pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nodata: Option<f32>) -> Vec<f32> {
-    // A 1x1 kernel is a full kernel applied once (GDAL 3.13.3), not two separable passes.
-    let separable = k.coefs.len() == k.size && k.size != 1;
-    let radius = (k.size / 2) as isize;
     let mut input = std::borrow::Cow::Borrowed(input);
-    for axis in 0..if separable { 2 } else { 1 } {
-        let src = &input;
-        let (ry, rx) = match (separable, axis) {
-            (false, _) => (radius, radius),
-            (true, 0) => (radius, 0),
-            _ => (0, radius),
-        };
-        // The taps `(dy, dx, coefficient)` in the order a pixel visits them, zeros left out.
-        let taps: Vec<(isize, isize, f64)> = (-ry..=ry)
-            .flat_map(|dy| (-rx..=rx).map(move |dx| (dy, dx)))
-            .enumerate()
-            .map(|(i, (dy, dx))| (dy, dx, if separable { k.coefs[(dy + dx + radius) as usize] } else { k.coefs[i] }))
-            .filter(|t| t.2 != 0.0)
-            .collect();
-        let (ry, rx) = (ry as usize, rx as usize);
+    for axis in 0..if separable(k) { 2 } else { 1 } {
+        let pass = Pass::new(&input, width, height, k, nodata, axis);
+        let (src, ry, rx) = (pass.src, pass.ry, pass.rx);
         // Ranks and counts grow with the square of the taps: past these, one pixel at a time.
         let rows = match k.function {
-            Some(NeighborMethod::Median) => taps.len() <= 49,
-            Some(NeighborMethod::Mode) => taps.len() <= 121,
+            Some(NeighborMethod::Median) => pass.taps.len() <= 49,
+            Some(NeighborMethod::Mode) => pass.taps.len() <= 121,
             _ => true,
         };
         // Each row's runs of the values a window leaves out.
@@ -334,11 +320,11 @@ pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nod
         let mut output = vec![0f32; width * height];
         crate::par::chunks_mut(&mut output, width.max(1), |y, row| {
             let mut scratch = Scratch::default();
-            let mut pixel = |x: usize| pixel_value(src, width, height, k, nodata, (separable, axis), x, y, &mut scratch);
+            let mut pixel = |x: usize| pixel_value(&pass, x, y, &mut scratch);
             // Rows of speckled nodata go one pixel at a time (`window::dirty_runs`).
             let dense = || runs[y - ry..=y + ry].iter().any(|r| super::window::is_dense(r, width));
             if rows && y >= ry && y + ry < height && width > 2 * rx && (runs.is_empty() || !dense()) {
-                taps_row(src, width, y, rx, &taps, k, nodata.unwrap_or(0.0), &mut row[rx..width - rx]);
+                taps_row(&pass, y, &mut row[rx..width - rx]);
                 let windows = match runs.is_empty() {
                     true => Vec::new(),
                     false => super::window::dirty_windows(runs[y - ry..=y + ry].iter().map(|r| &r[..]), rx, width),
@@ -360,6 +346,48 @@ pub(crate) fn filter(input: &[f32], width: usize, height: usize, k: &Kernel, nod
     input.into_owned()
 }
 
+/// Whether `k` is applied as two passes, down columns then along rows. A 1x1 kernel is a full
+/// kernel applied once (GDAL 3.13.3), not two separable passes.
+fn separable(k: &Kernel) -> bool {
+    k.coefs.len() == k.size && k.size != 1
+}
+
+/// One pass of [`filter`] over `src`: the whole window, or a separable kernel's column (`axis` 0)
+/// or row (`axis` 1).
+struct Pass<'a> {
+    src: &'a [f32],
+    width: usize,
+    height: usize,
+    k: &'a Kernel,
+    nodata: Option<f32>,
+    separable: bool,
+    axis: usize,
+    /// The window's reach above and below a pixel, and to each side.
+    ry: usize,
+    rx: usize,
+    /// The taps `(dy, dx, coefficient)` in the order a pixel visits them, zeros left out.
+    taps: Vec<(isize, isize, f64)>,
+}
+
+impl<'a> Pass<'a> {
+    fn new(src: &'a [f32], width: usize, height: usize, k: &'a Kernel, nodata: Option<f32>, axis: usize) -> Self {
+        let separable = separable(k);
+        let radius = (k.size / 2) as isize;
+        let (ry, rx) = match (separable, axis) {
+            (false, _) => (radius, radius),
+            (true, 0) => (radius, 0),
+            _ => (0, radius),
+        };
+        let taps = (-ry..=ry)
+            .flat_map(|dy| (-rx..=rx).map(move |dx| (dy, dx)))
+            .enumerate()
+            .map(|(i, (dy, dx))| (dy, dx, if separable { k.coefs[(dy + dx + radius) as usize] } else { k.coefs[i] }))
+            .filter(|t| t.2 != 0.0)
+            .collect();
+        Pass { src, width, height, k, nodata, separable, axis, ry: ry as usize, rx: rx as usize, taps }
+    }
+}
+
 /// The buffers of [`pixel_value`], kept from one pixel to the next.
 #[derive(Default)]
 struct Scratch {
@@ -367,19 +395,9 @@ struct Scratch {
     counts: std::collections::HashMap<u64, usize>,
 }
 
-/// The filtered value of pixel `(x, y)`: one pass (`(separable, axis)`) of [`filter`].
-#[allow(clippy::too_many_arguments)]
-fn pixel_value(
-    src: &[f32],
-    width: usize,
-    height: usize,
-    k: &Kernel,
-    nodata: Option<f32>,
-    (separable, axis): (bool, usize),
-    x: usize,
-    y: usize,
-    scratch: &mut Scratch,
-) -> f32 {
+/// The filtered value of pixel `(x, y)` in a [`Pass`] of [`filter`].
+fn pixel_value(pass: &Pass<'_>, x: usize, y: usize, scratch: &mut Scratch) -> f32 {
+    let Pass { src, width, height, k, nodata, separable, axis, .. } = *pass;
     let radius = (k.size / 2) as isize;
     let Scratch { values, counts } = scratch;
     let center = src[y * width + x];
@@ -474,79 +492,63 @@ fn median_of(values: &mut [f64]) -> f64 {
     if n % 2 == 1 { mid } else { (below.iter().copied().max_by(f64::total_cmp).unwrap_or(mid) + mid) / 2.0 }
 }
 
-/// [`pixel_value`] for the pixels `rx..width - rx` of row `y` (`out`), whose windows are inside
-/// the grid and hold no nodata: sums, means, minimums, maximums and standard deviations taken tap
-/// after tap over the whole row, so each pixel's arithmetic is in its own order; medians and modes
-/// from the ranks and counts of the taps ([`order_row`]).
-#[allow(clippy::too_many_arguments)]
-fn taps_row(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: the CPU has AVX2.
-        return unsafe { taps_row_avx2(src, width, y, rx, taps, k, empty, out) };
-    }
-    taps_row_body(src, width, y, rx, taps, k, empty, out);
-}
-
-/// [`taps_row`] with AVX2's vectors: the same operations (no FMA contraction), so the same values.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[allow(clippy::too_many_arguments)]
-fn taps_row_avx2(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
-    taps_row_body(src, width, y, rx, taps, k, empty, out);
-}
-
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn taps_row_body(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], k: &Kernel, empty: f32, out: &mut [f32]) {
-    if matches!(k.function, Some(NeighborMethod::Median | NeighborMethod::Mode)) {
-        return order_row(src, width, y, rx, taps, k.function == Some(NeighborMethod::Median), empty, out);
-    }
-    let n = out.len();
-    if k.function == Some(NeighborMethod::StdDev) {
-        // Welford's running mean and sum of squares, every tap valid.
-        let (mut mean, mut m2) = (vec![0.0f64; n], vec![0.0f64; n]);
-        for (t, &(dy, dx, c)) in taps.iter().enumerate() {
+avx2_rows! {
+    /// [`pixel_value`] for the pixels `rx..width - rx` of row `y` (`out`), whose windows are inside
+    /// the grid and hold no nodata: sums, means, minimums, maximums and standard deviations taken tap
+    /// after tap over the whole row, so each pixel's arithmetic is in its own order; medians and modes
+    /// from the ranks and counts of the taps ([`order_row`]).
+    fn taps_row[](pass: &Pass<'_>, y: usize, out: &mut [f32]) {
+        let (src, width, rx, taps, k) = (pass.src, pass.width, pass.rx, &pass.taps[..], pass.k);
+        let empty = pass.nodata.unwrap_or(0.0);
+        if matches!(k.function, Some(NeighborMethod::Median | NeighborMethod::Mode)) {
+            return order_row(pass, y, k.function == Some(NeighborMethod::Median), out);
+        }
+        let n = out.len();
+        if k.function == Some(NeighborMethod::StdDev) {
+            // Welford's running mean and sum of squares, every tap valid.
+            let (mut mean, mut m2) = (vec![0.0f64; n], vec![0.0f64; n]);
+            for (t, &(dy, dx, c)) in taps.iter().enumerate() {
+                let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize;
+                let valid = (t + 1) as f64;
+                for ((mean, m2), v) in mean.iter_mut().zip(m2.iter_mut()).zip(&src[from..from + n]) {
+                    let v = f64::from(*v) * c;
+                    let delta = v - *mean;
+                    *mean += delta / valid;
+                    *m2 += delta * (v - *mean);
+                }
+            }
+            let count = taps.len() as f64;
+            for (o, m2) in out.iter_mut().zip(&m2) {
+                *o = if taps.is_empty() { empty } else { (m2 / count).sqrt() as f32 };
+            }
+            return;
+        }
+        let start = match k.function {
+            Some(NeighborMethod::Max) => f64::NEG_INFINITY,
+            Some(NeighborMethod::Min) => f64::INFINITY,
+            _ => 0.0,
+        };
+        let mut acc = vec![start; n];
+        for &(dy, dx, c) in taps {
             let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize;
-            let valid = (t + 1) as f64;
-            for ((mean, m2), v) in mean.iter_mut().zip(m2.iter_mut()).zip(&src[from..from + n]) {
-                let v = f64::from(*v) * c;
-                let delta = v - *mean;
-                *mean += delta / valid;
-                *m2 += delta * (v - *mean);
+            let s = &src[from..from + n];
+            match k.function {
+                Some(NeighborMethod::Max) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.max(f64::from(*v) * c)),
+                Some(NeighborMethod::Min) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.min(f64::from(*v) * c)),
+                _ => acc.iter_mut().zip(s).for_each(|(a, v)| *a += f64::from(*v) * c),
             }
         }
-        let count = taps.len() as f64;
-        for (o, m2) in out.iter_mut().zip(&m2) {
-            *o = if taps.is_empty() { empty } else { (m2 / count).sqrt() as f32 };
+        // `pixel_value`'s results; `taps` empty is a window without a valid neighbour.
+        let weight = taps.iter().fold(0.0, |w, t| w + t.2);
+        let none = taps.is_empty() && (k.function.is_some() || k.normalized);
+        for (o, a) in out.iter_mut().zip(&acc) {
+            *o = match k.function {
+                _ if none => empty,
+                None if k.normalized && weight == 0.0 => empty,
+                None if k.normalized => (*a / weight) as f32,
+                _ => *a as f32,
+            };
         }
-        return;
-    }
-    let start = match k.function {
-        Some(NeighborMethod::Max) => f64::NEG_INFINITY,
-        Some(NeighborMethod::Min) => f64::INFINITY,
-        _ => 0.0,
-    };
-    let mut acc = vec![start; n];
-    for &(dy, dx, c) in taps {
-        let from = (y as isize + dy) as usize * width + (rx as isize + dx) as usize;
-        let s = &src[from..from + n];
-        match k.function {
-            Some(NeighborMethod::Max) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.max(f64::from(*v) * c)),
-            Some(NeighborMethod::Min) => acc.iter_mut().zip(s).for_each(|(a, v)| *a = a.min(f64::from(*v) * c)),
-            _ => acc.iter_mut().zip(s).for_each(|(a, v)| *a += f64::from(*v) * c),
-        }
-    }
-    // `pixel_value`'s results; `taps` empty is a window without a valid neighbour.
-    let weight = taps.iter().fold(0.0, |w, t| w + t.2);
-    let none = taps.is_empty() && (k.function.is_some() || k.normalized);
-    for (o, a) in out.iter_mut().zip(&acc) {
-        *o = match k.function {
-            _ if none => empty,
-            None if k.normalized && weight == 0.0 => empty,
-            None if k.normalized => (*a / weight) as f32,
-            _ => *a as f32,
-        };
     }
 }
 
@@ -555,8 +557,9 @@ fn taps_row_body(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize,
 /// picks the median; a tap's count among the taps up to it (equal after adding 0, NaN never)
 /// picks the mode, the first tap whose count exceeds those before.
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn order_row(src: &[f32], width: usize, y: usize, rx: usize, taps: &[(isize, isize, f64)], median: bool, empty: f32, out: &mut [f32]) {
+fn order_row(pass: &Pass<'_>, y: usize, median: bool, out: &mut [f32]) {
+    let (src, width, rx, taps) = (pass.src, pass.width, pass.rx, &pass.taps[..]);
+    let empty = pass.nodata.unwrap_or(0.0);
     const LANES: usize = 32;
     let nt = taps.len();
     if nt == 0 {
@@ -898,13 +901,11 @@ mod tests {
                     for nodata in [None, Some(-9999.0f32), Some(f32::NAN)] {
                         let got = filter(&src, w, h, &k, nodata);
                         // The per-pixel values, pass after pass.
-                        let separable = k.coefs.len() == k.size && k.size != 1;
                         let mut expected = src.clone();
-                        for axis in 0..if separable { 2 } else { 1 } {
+                        for axis in 0..if separable(&k) { 2 } else { 1 } {
                             let mut scratch = Scratch::default();
-                            expected = (0..w * h)
-                                .map(|i| pixel_value(&expected, w, h, &k, nodata, (separable, axis), i % w, i / w, &mut scratch))
-                                .collect();
+                            let pass = Pass::new(&expected, w, h, &k, nodata, axis);
+                            expected = (0..w * h).map(|i| pixel_value(&pass, i % w, i / w, &mut scratch)).collect();
                         }
                         let same = got.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits());
                         assert!(same, "coefs {coefs:?}, {function:?}, normalized {normalized}, nodata {nodata:?}");
