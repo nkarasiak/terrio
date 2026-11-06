@@ -1096,6 +1096,33 @@ pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
 mod tests {
     use super::zlib_compress;
 
+    /// The output equals libdeflate's at level 6 (`libdeflate_zlib_compress`), given by its length
+    /// and CRC-32: text, incompressible bytes (stored blocks), a smooth Int16 tile of 512 KiB (several
+    /// blocks) and a 27-byte input, under the passthrough size (one stored block). The expected
+    /// values were computed with libdeflate 1.19 (the port follows 1.26, which was compared on
+    /// raster tiles outside the suite).
+    #[test]
+    fn output_matches_libdeflate() {
+        let mut v = 0i64;
+        let walk: Vec<u8> = lcg(512 * 512, 2, 256)
+            .into_iter()
+            .flat_map(|s| {
+                v += i64::from(s % 7) - 3;
+                (v.div_euclid(8) as u16).to_le_bytes()
+            })
+            .collect();
+        let cases: [(&str, Vec<u8>, usize, u32); 4] = [
+            ("text", b"The quick brown fox jumps over the lazy dog. ".repeat(3000), 460, 0x8706a878),
+            ("random", lcg(70000, 1, 256), 70016, 0x78d8eb6e),
+            ("walk", walk, 60719, 0xb685dbf7),
+            ("small", b"abcabcabc".repeat(3), 38, 0x5cbab911),
+        ];
+        for (name, input, len, crc) in cases {
+            let z = zlib_compress(&input);
+            assert_eq!((z.len(), zlib_rs::crc32::crc32(0, &z)), (len, crc), "{name}");
+        }
+    }
+
     fn roundtrip(data: &[u8]) {
         let z = zlib_compress(data);
         let mut out = vec![0u8; data.len() + 1];

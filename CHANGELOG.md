@@ -6,7 +6,7 @@
   level 6 compressor, in place of zlib-rs: the level GDAL uses for them, and the library it uses
   when built with libdeflate. The chunks are libdeflate's, byte for byte: every 512 x 512 tile of
   six rasters (float32 DEM, int16 classes, two Sentinel-2 uint16 bands, float32 reflectance and
-  NDVI), 1,616 tiles, compared equal outside the test suite, whose tests check round trips. On one core, the DEM's 165 tiles compress in 1.36 s, where zlib-rs took 2.6 s and
+  NDVI), 1,616 tiles, compared equal outside the test suite, whose tests check round trips and libdeflate's output for four inputs. On one core, the DEM's 165 tiles compress in 1.36 s, where zlib-rs took 2.6 s and
   libdeflate 1.65 s (a Sentinel-2 band: 1.98 / 3.6 / 2.24 s), to 136.46 MB, as libdeflate's,
   where zlib-rs's took 136.09 MB. Writing the 5610 x 7533 DEM as a Deflate COG takes 2.75 s of
   CPU, down from 3.7 s (rioxarray: 2.95 s); its pixels and overviews equal GDAL's, and its size
