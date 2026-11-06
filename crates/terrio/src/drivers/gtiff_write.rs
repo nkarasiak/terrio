@@ -2134,74 +2134,47 @@ impl TiffRows {
             }
             self.pending_mask.extend_from_slice(m);
         }
-        // Pending rows are kept band after band, in the raster's type.
+        // Pending rows are kept band after band, in the raster's type; these rows follow them, or
+        // are read where they are when none is pending.
         let old = self.pending_rows;
         let (cols, bands) = (self.cols, self.bands);
-        macro_rules! merge {
-            ($($v:ident),*) => {
-                match (&mut self.pending, data) {
-                    $((RasterData::$v(p), RasterData::$v(d)) => {
-                        let mut merged = Vec::with_capacity(cols * (old + rows) * bands);
-                        for b in 0..bands {
-                            merged.extend_from_slice(&p[b * cols * old..(b + 1) * cols * old]);
-                            merged.extend_from_slice(&d[b * n..(b + 1) * n]);
-                        }
-                        *p = merged;
-                    })*
-                    _ => return Err(Error::InvalidArgument("the rows are not of the raster's data type".into())),
-                }
-            };
-        }
-        merge!(U8, I8, U16, I16, U32, I32, U64, I64, F32, F64);
-        self.pending_rows = old + rows;
+        let all = if old > 0 {
+            std::borrow::Cow::Owned(append_rows(&self.pending, old, data, rows, cols, bands)?)
+        } else if data.data_type() == self.data_type {
+            std::borrow::Cow::Borrowed(data)
+        } else {
+            return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
+        };
         // The complete block rows (and the last rows of the raster), compressed together, then
         // the rows left over, kept for the next call.
-        let total = self.pending_rows;
+        let total = old + rows;
         let start = if self.rows_done + total == self.rows { total } else { total / self.block_rows * self.block_rows };
-        if start > 0 {
-            self.flush_block_rows(start, total)?;
-            macro_rules! keep {
-                ($($v:ident),*) => {
-                    match &mut self.pending {
-                        $(RasterData::$v(p) => {
-                            let mut rest = Vec::with_capacity(cols * (total - start) * bands);
-                            for b in 0..bands {
-                                rest.extend_from_slice(&p[(b * total + start) * cols..(b + 1) * total * cols]);
-                            }
-                            *p = rest;
-                        })*
-                    }
-                };
-            }
-            keep!(U8, I8, U16, I16, U32, I32, U64, I64, F32, F64);
+        if start == 0 {
+            self.pending = all.into_owned();
+        } else {
+            let (slab, rest) = if start == total {
+                (all, RasterData::new_filled(self.data_type, 0, 0.0))
+            } else {
+                (
+                    std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands)),
+                    slice_rows(&all, total, start..total, cols, bands),
+                )
+            };
+            self.flush_block_rows(slab, start)?;
             if self.mask.is_some() {
                 self.pending_mask.drain(..start * cols);
             }
-            self.pending_rows = total - start;
+            self.pending = rest;
         }
+        self.pending_rows = total - start;
         Ok(())
     }
 
-    /// Compresses (in parallel) and writes the first `h` pending rows (of `total`): whole block
-    /// rows, or the raster's last rows.
-    fn flush_block_rows(&mut self, h: usize, total: usize) -> Result<()> {
+    /// Compresses (in parallel) and writes `h` rows `data` (band after band): whole block rows, or
+    /// the raster's last rows.
+    fn flush_block_rows(&mut self, data: std::borrow::Cow<'_, RasterData>, h: usize) -> Result<()> {
         let (cols, bands) = (self.cols, self.bands);
-        macro_rules! slab {
-            ($($v:ident),*) => {
-                match &self.pending {
-                    $(RasterData::$v(p) => {
-                        let mut slab = Vec::with_capacity(cols * h * bands);
-                        for b in 0..bands {
-                            let src = b * total * cols;
-                            slab.extend_from_slice(&p[src..src + cols * h]);
-                        }
-                        RasterData::$v(slab)
-                    })*
-                }
-            };
-        }
-        let data = slab!(U8, I8, U16, I16, U32, I32, U64, I64, F32, F64);
-        let level = Level { cols, rows: h, bands, data: std::borrow::Cow::Owned(data) };
+        let level = Level { cols, rows: h, bands, data };
         // Tiles are padded to full height.
         let layout = Layout { rows_per_strip: Some(self.block_rows as u32), extra: self.layout.extra.clone(), ..self.layout };
         let img = level.image(self.data_type, self.compression, &self.codec, &layout)?;
