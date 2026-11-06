@@ -6,7 +6,7 @@
   reads by window (`LazyRaster::read_resampled`) copy pixels fewer times, as do GeoTIFFs other
   than COGs written in rows (`GeoTiffWriter::write_rows`, which streamed GeoTIFF outputs use)
   when the rows given end a block row or the raster, with byte-identical results. Translating a
-  14412 x 14412 float32 Deflate GeoTIFF to an uncompressed GeoTIFF on one CPU takes 60% fewer
+  14412 x 14412 float32 Deflate GeoTIFF to an uncompressed GeoTIFF on one CPU takes 62% fewer
   page faults. `GeoTiffWriter::write_rows` refuses rows of another type, even none, before taking
   their mask rows, which a refused call left queued.
 - `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes most of its 3×3 products a row at a
