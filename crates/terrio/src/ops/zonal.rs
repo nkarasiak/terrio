@@ -306,8 +306,8 @@ fn hold_values(budget: &(Mutex<usize>, std::sync::Condvar), bytes: usize) -> Res
 
 /// The most bytes of zone values that the passes of all sources hold together, for statistics
 /// that keep values (median, quantiles, mode, minority, variety); one pass may exceed it when it
-/// runs alone. While a zone finishes, a sorted copy of one band's values adds 16 bytes per pixel
-/// of that zone. Small in unit tests, so that they reduce bands in several passes.
+/// runs alone. While a zone finishes, binning one band's values by value adds up to 16 bytes per
+/// pixel of that zone. Small in unit tests, so that they reduce bands in several passes.
 const VALUES_PER_PASS: usize = if cfg!(test) { 64 } else { 1 << 30 };
 
 /// Errors on a repeated statistic, a quantile outside 0 to 100, or a zone that is not a polygon or

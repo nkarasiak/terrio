@@ -916,6 +916,34 @@ mod tests {
         assert!(Accumulator::new(&Plan::new(&[Statistic::Mean], false, &[0]), 1 << 20, DataType::U8).histogram.is_none());
     }
 
+    /// A stream of an 8-bit raster opens a zone of at least 256 pixels with a histogram, whether
+    /// the type is the raster's (`reduce_source`) or that of the strip opening the zone; a stream
+    /// declared Float64 lists the values.
+    #[test]
+    fn eight_bit_streams_open_zones_with_histograms() {
+        use super::{StreamState, Strip};
+        let (cols, rows) = (40, 30);
+        let mut layer = Layer::new("zones");
+        layer.features.push(Feature { fid: 0, geometry: Some(Geometry::polygon(ring(0., 0., 40., 30.), vec![])), attributes: vec![] });
+        let cfg = RasterConfig { cols, rows, data_type: DataType::U8, ..Default::default() };
+        let pixels: Vec<f64> = (0..cols * rows).map(|i| (i % 251) as f64).collect();
+        let mut ds = RasterDataset::new(Raster::from_data(cfg, pixels).unwrap(), false);
+        ds.set_geo_transform([0.0, 1.0, 0.0, rows as f64, 0.0, -1.0]);
+        let mut raster = LazyRaster::from(ds);
+        let index = build(&layer, &GridKey::of(&raster), false, false).unwrap();
+        assert!(index.zones[0].pixels() >= 256);
+        let plan = Plan::new(&[Statistic::Median], false, &[0]);
+        let window = crate::Window { x: 0, y: 0, width: cols, height: 7 };
+        let strip = Strip::read(&mut raster, window, &crate::WindowOptions { bands: vec![1], overview: None }).unwrap();
+        assert_eq!(strip.data_type, DataType::U8);
+        for (data_type, histogram) in [(Some(DataType::U8), true), (None, true), (Some(DataType::F64), false)] {
+            let mut state = StreamState::new(vec![None], &plan, data_type);
+            state.add_strip(&index, &plan, window, &strip, None).unwrap();
+            assert_eq!(state.open.len(), 1, "the zone stays open past its first strip");
+            assert_eq!(state.open[0].2[0].histogram.is_some(), histogram, "{data_type:?}");
+        }
+    }
+
     /// A pixel without coverage counts in neither the histogram nor the lists, so both agree.
     #[test]
     fn pixels_without_coverage_count_nowhere() {
