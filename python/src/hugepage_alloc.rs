@@ -1,7 +1,7 @@
 //! The extension's allocator: the system allocator, with buffers of 4 MiB or more advised to use
-//! transparent huge pages, as NumPy advises its arrays. Under the kernel's default `madvise` THP
-//! mode, a raster buffer otherwise takes a page fault every 4 KiB on first write: filling 170 MB
-//! took 0.048 s with 4 KiB pages and 0.019 s with huge pages.
+//! transparent huge pages, as NumPy advises its arrays. Under THP's `madvise` mode (the default of
+//! some distributions), a raster buffer otherwise takes a page fault every 4 KiB on first write:
+//! filling 170 MB took 0.048 s with 4 KiB pages and 0.019 s with huge pages.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 
