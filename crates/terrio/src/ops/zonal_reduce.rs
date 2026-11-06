@@ -169,6 +169,12 @@ pub(super) fn open_pixels_peak(index: &ZoneIndex, strip_rows: usize, per_zone: u
 /// (in layer order). Strips are `strip_rows` rows starting at multiples of it; strips that no
 /// zone intersects are not read. The next strips are read on other threads while one is reduced
 /// (`strips::read_ahead`).
+///
+/// With `histograms`, zones of an 8- or 16-bit raster count their values in histograms of the
+/// type the raster declares, as [`values_per_zone`] charges them. A strip read in another type
+/// could hold values those histograms do not count, listed beyond that charge: the reduction then
+/// stops and gives `None`, for the caller to reduce the bands again without histograms.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reduce_source(
     index: &ZoneIndex,
     raster: &mut LazyRaster,
@@ -177,9 +183,14 @@ pub(super) fn reduce_source(
     plan: &Plan<'_>,
     strip_rows: usize,
     ahead: usize,
-) -> Result<Vec<Vec<Vec<FieldValue>>>> {
+    histograms: bool,
+) -> Result<Option<Vec<Vec<Vec<FieldValue>>>>> {
     let windows = strip_windows(index, strip_rows.max(1));
-    let data_type = raster.data_type();
+    let declared = raster.data_type();
+    // Float64 has no histogram range: zones list every value.
+    let data_type = if histograms { declared } else { DataType::F64 };
+    let check_type = histograms && histogram_range(declared).is_some();
+    let mut other_type = false;
     let read_bands = WindowOptions { bands: bands.iter().map(|b| b.band).collect(), overview: None };
     // Reads share one handle each: reads of a raster take turns, but overlap the reduction.
     let raster = std::sync::Mutex::new(raster);
@@ -187,7 +198,7 @@ pub(super) fn reduce_source(
     let weight_raster = std::sync::Mutex::new(weight.map(|w| w.raster));
     let lock = |m| Error::InvalidArgument(format!("zonal {m} reader lock poisoned"));
     let mut state = StreamState::new(bands.iter().map(|b| b.nodata).collect(), plan, Some(data_type));
-    crate::ops::strips::read_ahead_by(
+    let result = crate::ops::strips::read_ahead_by(
         ahead,
         windows.len(),
         |i| {
@@ -201,9 +212,18 @@ pub(super) fn reduce_source(
             };
             Ok((strip, weights))
         },
-        |i, (strip, weights)| state.add_strip(index, plan, windows[i], &strip, weights.as_ref().map(|(w, nodata)| (w, *nodata))),
-    )?;
-    state.finish(index)
+        |i, (strip, weights)| {
+            if check_type && strip.data_type != declared {
+                other_type = true;
+                return Err(Error::InvalidData(format!("a strip came back as {:?}, not {declared:?}", strip.data_type)));
+            }
+            state.add_strip(index, plan, windows[i], &strip, weights.as_ref().map(|(w, nodata)| (w, *nodata)))
+        },
+    );
+    match result {
+        Err(_) if other_type => Ok(None),
+        result => result.and_then(|()| state.finish(index)).map(Some),
+    }
 }
 
 /// A reduction fed strip by strip in increasing rows: a zone opens at the strip holding its first
@@ -873,7 +893,8 @@ mod tests {
         let mut mean = |names: &[&str]| {
             let stats: Vec<Statistic> = names.iter().map(|s| Statistic::parse(s).unwrap()).collect();
             let plan = Plan::new(&stats, false, &[0]);
-            reduce_source(&index, &mut raster, &[BandSpec { band: 1, nodata: None }], None, &plan, rows, 4).unwrap()[0][0][0].clone()
+            reduce_source(&index, &mut raster, &[BandSpec { band: 1, nodata: None }], None, &plan, rows, 4, true).unwrap().unwrap()[0][0][0]
+                .clone()
         };
         let expected = crate::FieldValue::Float(sum / (cols * rows) as f64);
         assert_eq!(mean(&["mean"]), expected);
@@ -912,6 +933,39 @@ mod tests {
 
     /// Zones of at least as many pixels as an 8- or 16-bit band has values are counted in a
     /// histogram: the same results as the value lists of the same values in a Float64 band.
+    /// A raster declared 8-bit whose strips come back as floats (half-integer values here, which a
+    /// histogram cannot count) is reduced without histograms: `reduce_source` says so before
+    /// listing them beyond the charge, and `zonal_stats` gives the float raster's results.
+    #[test]
+    fn strips_of_another_type_than_declared_are_reduced_without_histograms() {
+        let (cols, rows) = (40, 30);
+        let mut layer = Layer::new("zones");
+        layer.features.push(Feature { fid: 0, geometry: Some(Geometry::polygon(ring(0., 0., 40., 30.), vec![])), attributes: vec![] });
+        let pixels: Vec<f64> = (0..cols * rows).map(|i| (i % 37) as f64 + 0.5).collect();
+        let raster = |declared| {
+            let cfg = RasterConfig { cols, rows, data_type: DataType::F64, ..Default::default() };
+            let mut ds = RasterDataset::new(Raster::from_data(cfg, pixels.clone()).unwrap(), false);
+            ds.set_geo_transform([0.0, 1.0, 0.0, rows as f64, 0.0, -1.0]);
+            ds.raster.data_type = declared;
+            LazyRaster::from(ds)
+        };
+        let (mut declared_u8, mut float) = (raster(DataType::U8), raster(DataType::F64));
+        assert_eq!(declared_u8.data_type(), DataType::U8);
+        let stats = [Statistic::Count, Statistic::Median, Statistic::Mode, Statistic::Variety];
+        let plan = Plan::new(&stats, false, &[0]);
+        let index = build(&layer, &GridKey::of(&float), false, false).unwrap();
+        let bands = [BandSpec { band: 1, nodata: None }];
+        assert!(reduce_source(&index, &mut declared_u8, &bands, None, &plan, 7, 1, true).unwrap().is_none());
+        let expected = reduce_source(&index, &mut float, &bands, None, &plan, 7, 1, true).unwrap().unwrap();
+        assert_eq!(reduce_source(&index, &mut declared_u8, &bands, None, &plan, 7, 1, false).unwrap().unwrap(), expected);
+        let zonal = |raster: LazyRaster| {
+            let source = crate::ops::zonal::ZonalSource { raster: raster.into(), bands: vec![crate::ops::zonal::ZonalBand::new(1, "v")] };
+            let options = crate::ops::zonal::ZonalOptions { stats: stats.to_vec(), ..Default::default() };
+            crate::ops::zonal::zonal_stats(&layer, &mut [source], &options).unwrap().features[0].attributes.clone()
+        };
+        assert_eq!(zonal(raster(DataType::U8)), zonal(raster(DataType::F64)));
+    }
+
     #[test]
     fn counted_integer_bands_match_listed_float_bands() {
         let (cols, rows) = (400, 300);
@@ -949,10 +1003,12 @@ mod tests {
             for fractional in [false, true] {
                 let index = build(&layer, &GridKey::of(&listed), false, fractional).unwrap();
                 let plan = Plan::new(&stats, fractional, &fids);
-                let expected = reduce_source(&index, &mut listed, &[BandSpec { band: 1, nodata }], None, &plan, rows, 1).unwrap();
+                let expected =
+                    reduce_source(&index, &mut listed, &[BandSpec { band: 1, nodata }], None, &plan, rows, 1, true).unwrap().unwrap();
                 assert!(expected[0].iter().all(|s| s.iter().all(|v| !v.is_null())));
                 for strip in [rows, 7] {
-                    let got = reduce_source(&index, &mut counted, &[BandSpec { band: 1, nodata }], None, &plan, strip, 2).unwrap();
+                    let got =
+                        reduce_source(&index, &mut counted, &[BandSpec { band: 1, nodata }], None, &plan, strip, 2, true).unwrap().unwrap();
                     if !fractional {
                         assert_eq!(got, expected, "{data_type:?} strip {strip}");
                         continue;
@@ -1061,10 +1117,14 @@ mod tests {
             let index = build(&layer, &GridKey::of(&raster), false, fractional).unwrap();
             let plan = Plan::new(&stats, fractional, &fids);
             let bands = || vec![BandSpec { band: 1, nodata: None }, BandSpec { band: 2, nodata: None }];
-            let whole = reduce_source(&index, &mut raster, &bands(), None, &plan, rows, 4).unwrap();
+            let whole = reduce_source(&index, &mut raster, &bands(), None, &plan, rows, 4, true).unwrap().unwrap();
             assert!(whole[0][0].iter().all(|v| !v.is_null()));
             for strip in [1, 7, 64] {
-                assert_eq!(reduce_source(&index, &mut raster, &bands(), None, &plan, strip, 1).unwrap(), whole, "strip {strip}");
+                assert_eq!(
+                    reduce_source(&index, &mut raster, &bands(), None, &plan, strip, 1, true).unwrap().unwrap(),
+                    whole,
+                    "strip {strip}"
+                );
             }
         }
     }
