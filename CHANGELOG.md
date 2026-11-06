@@ -18,7 +18,8 @@
   PNG, JPEG and RST, with their `.hdr`, ENVI and ERS headers, `.sgrd`, `.rdc` and `.wld` files
   (the other writers are still truncated, among them `.prj` and `.aux.xml` sidecars, XYZ, VRT,
   GRIB2, MBTiles, PMTiles, Zarr, the formats wbraster writes and those written through GDAL; on
-  Windows they still truncate first, so a file another process maps is refused unchanged). The file
+  Windows the in-place writers still truncate the file when they open it, so a file another
+  process maps is refused unchanged). The file
   stays the same file: a symlink is written through, it keeps its permissions, and its hard links
   and readers holding it open see the new content; a shorter output drops the old tail. The file's
   first 16 bytes, where formats with a signature put it, are zeroed at once and written last, and
