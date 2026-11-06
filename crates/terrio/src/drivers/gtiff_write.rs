@@ -1972,8 +1972,8 @@ impl GeoTiffWriter {
     ///
     /// # Errors
     /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
-    /// rows go past the raster's height, a mask is given for a COG without one, or the file
-    /// cannot be written.
+    /// rows go past the raster's height, the file has a mask and `mask` does not hold its rows, a
+    /// mask is given for a COG without one, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
             RowWriter::Tiff(t) => t.write_rows(data, rows, mask),
@@ -2113,6 +2113,9 @@ impl TiffRows {
     /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
     /// rows go past the raster's height, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
+        if data.data_type() != self.data_type {
+            return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
+        }
         if rows == 0 {
             return Ok(());
         }
@@ -2128,51 +2131,55 @@ impl TiffRows {
                 self.cols
             )));
         }
-        if data.data_type() != self.data_type {
-            return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
-        }
-        if self.mask.is_some() {
-            let m = mask.ok_or_else(|| Error::InvalidArgument("the file has a mask: give its rows".into()))?;
-            if m.len() != n {
+        let mask = match (&self.mask, mask) {
+            (None, _) => None,
+            (Some(_), None) => return Err(Error::InvalidArgument("the file has a mask: give its rows".into())),
+            (Some(_), Some(m)) if m.len() != n => {
                 return Err(Error::InvalidArgument(format!("{} mask values for {rows} rows of {} columns", m.len(), self.cols)));
             }
-            self.pending_mask.extend_from_slice(m);
-        }
+            (Some(_), m) => m,
+        };
         // Pending rows are kept band after band, in the raster's type; these rows follow them, or
         // are read where they are when none is pending.
-        // Taken with the pending rows: a write that fails leaves none pending.
-        let old = std::mem::take(&mut self.pending_rows);
+        let old = self.pending_rows;
         let (cols, bands) = (self.cols, self.bands);
         let data_type = self.data_type;
         let empty = || RasterData::new_filled(data_type, 0, 0.0);
         let all = if old > 0 {
-            // Taken out, so that they are freed once copied.
-            let pending = std::mem::replace(&mut self.pending, empty());
-            std::borrow::Cow::Owned(append_rows(&pending, old, data, rows, cols, bands)?)
+            let joined = append_rows(&self.pending, old, data, rows, cols, bands)?;
+            // Freed once copied.
+            self.pending = empty();
+            std::borrow::Cow::Owned(joined)
         } else {
             std::borrow::Cow::Borrowed(data)
         };
+        if let Some(m) = mask {
+            self.pending_mask.extend_from_slice(m);
+        }
         // The complete block rows (and the last rows of the raster), compressed together, then
         // the rows left over, kept for the next call.
         let total = old + rows;
         let start = if self.rows_done + total == self.rows { total } else { total / self.block_rows * self.block_rows };
         let written = if start == 0 {
-            Ok(all.into_owned())
+            Ok(())
         } else if start == total {
-            self.flush_block_rows(all, start).map(|()| empty())
+            self.flush_block_rows(&all, start)
         } else {
-            // The rows left over are copied once the slab is written and freed.
-            let slab = std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands));
-            self.flush_block_rows(slab, start).map(|()| slice_rows(&all, total, start..total, cols, bands))
+            // Freed before the rows left over are copied.
+            let slab = slice_rows(&all, total, 0..start, cols, bands);
+            self.flush_block_rows(&slab, start)
         };
-        match written {
-            Ok(rest) => self.pending = rest,
-            Err(e) => {
-                // Their mask rows go with the rows dropped.
-                self.pending_mask.clear();
-                return Err(e);
-            }
+        if let Err(e) = written {
+            // Every row given so far stays pending, as before the write.
+            self.pending = all.into_owned();
+            self.pending_rows = total;
+            return Err(e);
         }
+        self.pending = match start {
+            0 => all.into_owned(),
+            _ if start == total => empty(),
+            _ => slice_rows(&all, total, start..total, cols, bands),
+        };
         if self.mask.is_some() {
             self.pending_mask.drain(..start * cols);
         }
@@ -2182,9 +2189,9 @@ impl TiffRows {
 
     /// Compresses (in parallel) and writes `h` rows `data` (band after band): whole block rows, or
     /// the raster's last rows.
-    fn flush_block_rows(&mut self, data: std::borrow::Cow<'_, RasterData>, h: usize) -> Result<()> {
+    fn flush_block_rows(&mut self, data: &RasterData, h: usize) -> Result<()> {
         let (cols, bands) = (self.cols, self.bands);
-        let level = Level { cols, rows: h, bands, data };
+        let level = Level { cols, rows: h, bands, data: std::borrow::Cow::Borrowed(data) };
         // Tiles are padded to full height.
         let layout = Layout { rows_per_strip: Some(self.block_rows as u32), extra: self.layout.extra.clone(), ..self.layout };
         let img = level.image(self.data_type, self.compression, &self.codec, &layout)?;
@@ -3047,6 +3054,27 @@ mod tests {
             assert_eq!(ds.crs().epsg, Some(32610));
             assert_eq!(ds.geo_transform(), [500000.0, 10.0, 0.0, 4000500.0, 0.0, -10.0]);
         }
+    }
+
+    /// A GeoTIFF row write that fails keeps every row given so far pending, its mask rows with
+    /// them, and a later write fails the same way rather than panicking.
+    #[test]
+    fn failed_row_writes_keep_their_rows_pending() {
+        let raster = overview_fixture(1, DataType::U8, RasterData::U8((0..65 * 35).map(|i| (i % 251) as u8).collect()));
+        let mut header = crate::RasterDataset::new(raster.clone(), false);
+        header.raster.data = RasterData::U8(Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed.tif");
+        let options = crate::RasterWriteOptions { creation_options: vec![("BLOCKYSIZE".into(), "16".into())], ..Default::default() };
+        let mut w = TiffRows::create(path.to_str().unwrap(), &header, &options).unwrap();
+        w.write_rows(&slice_rows(&raster.data, 35, 0..10, 65, 1), 10, None).unwrap();
+        // Past what a classic TIFF addresses: the block row is refused once written.
+        w.pos = u64::from(u32::MAX);
+        let rows = slice_rows(&raster.data, 35, 10..20, 65, 1);
+        assert!(w.write_rows(&rows, 10, None).is_err());
+        assert_eq!((w.rows_written(), w.pending_rows, w.pending.len()), (20, 20, 65 * 20));
+        assert!(w.write_rows(&slice_rows(&raster.data, 35, 20..30, 65, 1), 10, None).is_err());
+        assert_eq!(w.rows_written(), 30);
     }
 
     /// Invalid slabs must fail before consuming rows or changing the native overview state.

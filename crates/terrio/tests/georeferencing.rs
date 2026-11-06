@@ -253,6 +253,7 @@ fn internal_masks_and_rows_written_in_order() {
     header.raster.data = RasterData::U8(Vec::new());
     let mut w = GeoTiffWriter::create(dir.path().join("x.tif").to_str().unwrap(), &header, &Default::default()).unwrap();
     assert!(w.write_rows(&RasterData::F32(vec![0.0; 50 * 3]), 1, None).is_err());
+    assert!(w.write_rows(&RasterData::F32(Vec::new()), 0, None).is_err());
     assert!(w.write_rows(&RasterData::U8(vec![0; 50 * 41 * 3]), 41, None).is_err());
     assert!(w.finish().is_err());
 }
