@@ -14,9 +14,9 @@
   `docs/acknowledgements.md`.
 - Raster writers write over an existing file in place, where they truncated it first and waited for
   the kernel to write its old pages back: GeoTIFF and COG (whole, streamed and built from
-  overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, HGT, WebP, GSBG, GeoPackage, netCDF, JPEG 2000,
+  overviews), EHdr, ENVI, ERS, AAIGrid, SAGA, WebP, GSBG, GeoPackage, netCDF, JPEG 2000,
   PNG, JPEG and RST, with their `.hdr`, ENVI and ERS headers, `.sgrd`, `.rdc` and `.wld` files
-  (the other writers are still truncated, among them `.prj` and `.aux.xml` sidecars, XYZ, VRT,
+  (the other writers are still truncated, among them `.prj` and `.aux.xml` sidecars, XYZ, HGT, VRT,
   GRIB2, MBTiles, PMTiles, Zarr, the formats wbraster writes and those written through GDAL; on
   Windows the in-place writers still truncate the file when they open it, so a file another
   process maps is refused unchanged). The file
@@ -25,7 +25,7 @@
   first 16 bytes, where formats with a signature put it, are zeroed at once and written last, and
   the header of a headerless data file (EHdr, ENVI, ERS, SAGA, RST) is emptied before the data is
   written, so a write interrupted partway (the process killed, the disk full) leaves no such file
-  that opens as a raster of old and new bytes (HGT, recognised by its size, can be left so), and one
+  that opens as a raster of old and new bytes, and one
   that fails with an error leaves it empty; one that fails before the file is opened (a
   whole-raster encoding error, a data file or header sidecar it cannot open)
   leaves it as it was, and a sidecar failing after its data file is finished leaves the new data.
