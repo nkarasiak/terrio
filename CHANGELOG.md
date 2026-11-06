@@ -9,6 +9,34 @@
   14412 x 14412 float32 Deflate GeoTIFF to an uncompressed GeoTIFF on one CPU takes 60% fewer
   page faults. `GeoTiffWriter::write_rows` refuses rows of another type, even none, before taking
   their mask rows, which a refused call left queued.
+- `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes most of its 3×3 products a row at a
+  time, with AVX2 where the CPU has it, and most rows holding nodata no longer fall back to one
+  pixel at a time. Some products take their arctangents from fdlibm (credited in `NOTICE`,
+  `LICENSES/SunPro.txt` and the acknowledgements) and recompute with the platform's functions any
+  pixel whose result could round differently. Outputs are bit-identical to the previous build (144
+  products and options on four DEMs: Float32 and Int16, with and without nodata), and slope (with
+  and without `compute_edges`) and hillshade equal gdaldem 3.8.4's on all 42,260,130 pixels. Slope
+  on a 5610 x 7533 Float32 DEM, one thread: 1.45 -> 0.27 s.
+- `terrio neighbors` (`focal`; Python `terrio.neighbors`, JavaScript `neighbors`) and VRT
+  `KernelFilteredSource` reads compute focal statistics and convolutions a row at a time (medians up
+  to 24 taps, modes up to 121), with AVX2 where the CPU has it, and the per-pixel median selects
+  instead of sorting. Values are unchanged: `terrio neighbors` outputs equal GDAL's VRT for mean,
+  gaussian, u, max and median, with and without nodata, and the previous build's for 20 kernels and
+  methods (40 outputs). Mean 3x3 on a 5610 x 7533 DEM, one thread: 1.31 -> 0.15 s.
+- Remote files read over HTTP(S) share one connection pool per process (up to 64 idle connections;
+  the /vsi file operations keep one pool per operation, as before), so files opened one after
+  another or from many threads reuse warm connections rather than each opening its own. The pool
+  is rebuilt when the timeout, connect timeout, user agent or proxy variables change, and in a
+  forked child, which never uses or closes the parent's connections. Opening a STAC item set of 10
+  Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s instead of 27.2 s (one run).
+- GeoTIFF: Deflate tiles and strips are decoded by terrio with `fdeflate` (pure Rust) when the file
+  and the host are little-endian and the samples are 8-, 16-, 32- or 64-bit integers (with or
+  without the horizontal predictor) or Float32 or Float64 without a predictor. YCbCr and WhiteIsZero
+  images, Float16 and complex samples, and RGB or CMYK images whose extra samples the `tiff` crate
+  misreads keep their previous decoders. A stream ending before the chunk's samples, or with a wrong
+  Adler-32 right after them, is an error; one cut in its trailer after the samples is read, as
+  libtiff with zlib reads it. All 121 tiles of a Sentinel-2 L2A band decode as the `tiff` crate
+  decodes them.
 - Dependencies with RustSec vulnerabilities leave the build. ctutils, zstd and zstd-safe move to
   releases that fix them (0.4.8, 0.13.4, 7.4.0). wbvector is built without its KMZ and OSM PBF
   readers, which terrio did not use for its drivers, so zip 0.6 and protobuf 2 (through
