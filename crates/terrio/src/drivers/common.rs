@@ -983,25 +983,36 @@ impl std::io::Seek for Rewrite {
 /// written over: a write interrupted in the data then leaves no header that would open the file as
 /// a raster of old and new bytes. The header is written again after the data.
 fn clear_header(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    open_header(path)?.map_or(Ok(()), |f| f.set_len(0))
+}
+
+/// The header sidecar at `path` opened for writing, unchanged; `None` when there is none to empty
+/// (missing, or not a regular file).
+fn open_header(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<std::fs::File>> {
     match std::fs::OpenOptions::new().write(true).open(path) {
-        Ok(f) if f.metadata()?.is_file() => f.set_len(0),
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(f) if f.metadata()?.is_file() => Ok(Some(f)),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
 }
 
 /// [`write_replacing`] for a headerless data file at `path` whose header sidecar `header` the
-/// caller writes after it. The data file is first opened without a change, so a write refused
-/// there (a read-only file) leaves both as they were; the header is then emptied ([`clear_header`])
-/// before any byte of the data file changes, and the data goes over the old.
+/// caller writes after it. The header, then the data file, are first opened without a change, so a
+/// write refused there (a read-only file) leaves both as they were; the header is then emptied
+/// ([`clear_header`]) before any byte of the data file changes, and the data goes over the old. On
+/// Windows the data file is truncated by that open, as by [`create_replacing`], so a data file
+/// another process maps is refused before its header is emptied.
 pub(crate) fn write_headerless(
     path: impl AsRef<std::path::Path>,
     header: impl AsRef<std::path::Path>,
     bytes: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-    std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path.as_ref())?;
-    clear_header(header)?;
+    let header = open_header(header)?;
+    std::fs::OpenOptions::new().write(true).create(true).truncate(cfg!(windows)).open(path.as_ref())?;
+    if let Some(f) = header {
+        f.set_len(0)?;
+    }
     write_replacing(path, bytes)
 }
 
@@ -1079,6 +1090,23 @@ mod tests {
         write_headerless(&bin, &hdr, [2u8; 4]).unwrap();
         assert_eq!(std::fs::read(&bin).unwrap(), [2u8; 4]);
         assert_eq!(std::fs::metadata(&hdr).unwrap().len(), 0);
+    }
+
+    /// On Windows a file written over is truncated when it is opened, as `File::create` did: a file
+    /// another process maps cannot be shortened, so it is refused there before any byte changes.
+    #[cfg(windows)]
+    #[test]
+    fn a_rewrite_on_windows_truncates_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bin, hdr) = (dir.path().join("a.bil"), dir.path().join("a.hdr"));
+        std::fs::write(&bin, vec![7u8; 1000]).unwrap();
+        let rewrite = create_replacing(&bin).unwrap();
+        assert_eq!(std::fs::metadata(&bin).unwrap().len(), 0);
+        drop(rewrite);
+        std::fs::write(&bin, vec![7u8; 1000]).unwrap();
+        std::fs::write(&hdr, "NROWS 1\n").unwrap();
+        write_headerless(&bin, &hdr, [2u8; 4]).unwrap();
+        assert_eq!(std::fs::read(&bin).unwrap(), [2u8; 4]);
     }
 
     /// A device is written over as before, with no truncation to fail on.
