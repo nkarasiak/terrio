@@ -16,6 +16,17 @@
   instead of sorting. Values are unchanged: `terrio neighbors` outputs equal GDAL's VRT for mean,
   gaussian, u, max and median, with and without nodata, and the previous build's for 20 kernels and
   methods (40 outputs). Mean 3x3 on a 5610 x 7533 DEM, one thread: 1.31 -> 0.15 s.
+- Warps with nearest or `average` resampling are faster, and so are bilinear warps past GDAL's
+  4-tap threshold (output pixels over 1/0.95 source pixels across in either direction, 2 or more
+  with `TERRIO_GDAL_COMPAT=3.13`); the arithmetic and its order are unchanged. Nearest from
+  EPSG:32615 to EPSG:32616 of an 1100 x 1100 uint16 Sentinel-2 window takes 12 ms of kernel time
+  instead of 29 (single-threaded).
+- A zero-length numeric, enum or compound attribute of a multidimensional dataset is `null`, as
+  GDAL 3.13.3's `gdalmdiminfo` prints it, where it was an empty list `[]`, in Rust, Python,
+  JavaScript and CLI results and in Zarr copies. A zero-length string attribute stays `[]`. A
+  netCDF snapshot leaves out these attributes and any empty list with no recorded native type,
+  as `gdalmdimtranslate -of netCDF` does, where it wrote an empty int64 attribute that read back
+  as `null`; a typed empty list is still written with its type.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).
