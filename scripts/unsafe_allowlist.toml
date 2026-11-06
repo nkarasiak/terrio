@@ -111,3 +111,8 @@ reason = "The libdeflate level-6 port's match finder: unaligned 4- and 8-byte lo
 count = 11
 origin = "added"
 reason = "The extension's global allocator: forwards every call to System, and madvise(MADV_HUGEPAGE) on whole pages (sysconf's page size) of large allocations, as NumPy does"
+
+[files."crates/terrio/src/ops/window.rs"]
+count = 1
+origin = "added"
+reason = "avx2_rows!: a row loop's AVX2 copy called after is_x86_feature_detected!; the macro gives four row loops of ops/dem.rs and ops/neighbors.rs"

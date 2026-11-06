@@ -52,6 +52,7 @@ half.workspace = true
 flate2.workspace = true
 # Adler-32 for the zlib streams of `deflate_compress`.
 zlib-rs = "0.6"
+fdeflate.workspace = true
 weezl.workspace = true
 png.workspace = true
 lz4_flex = { workspace = true, optional = true }
@@ -119,7 +120,7 @@ hecras = ["netcdf-hdf5", "dep:ras-commander-fast-hdf"]
 ## XLSX and XLSM workbooks as vector layers (pure Rust).
 xlsx = []
 ## OpenStreetMap PBF and XML.
-osm = ["dep:osmpbfreader", "wbvector/osmpbf"]
+osm = ["dep:osmpbfreader"]
 ## LZMA-compressed GeoTIFFs.
 lzma = ["dep:lzma-rust2"]
 ## FlatGeobuf.
