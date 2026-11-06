@@ -979,10 +979,10 @@ impl std::io::Seek for Rewrite {
     }
 }
 
-/// The header sidecar at `path` opened for writing, unchanged, to be emptied before its headerless
-/// data file is written over: a write interrupted in the data then leaves no header that would open
-/// the file as a raster of old and new bytes. `None` when there is none to empty (missing, or not a
-/// regular file).
+/// The header sidecar at `path` opened for writing, unchanged, to be emptied before the new data of
+/// its headerless data file is written: a write interrupted in the data then leaves no header that
+/// would open the file as a raster of old and new bytes. `None` when there is none to empty
+/// (missing, or not a regular file).
 fn open_header(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<std::fs::File>> {
     match std::fs::OpenOptions::new().write(true).open(path) {
         Ok(f) if f.metadata()?.is_file() => Ok(Some(f)),
@@ -994,8 +994,8 @@ fn open_header(path: impl AsRef<std::path::Path>) -> std::io::Result<Option<std:
 
 /// [`write_replacing`] for a headerless data file at `path` whose header sidecar `header` the
 /// caller writes after it. The header, then the data file, are first opened, so a write refused
-/// there (a read-only file) leaves both as they were; the header is then emptied ([`open_header`])
-/// and the data goes over the old. Elsewhere than on Windows the data file opens unchanged, so the
+/// there (a read-only file) leaves both as they were; the header is then emptied and the data goes
+/// over the old. Elsewhere than on Windows the data file opens unchanged, so the
 /// header is emptied before any of its bytes change; on Windows that open truncates it, as
 /// [`create_replacing`] does, so a data file another process maps is refused before the header
 /// is emptied.
