@@ -448,8 +448,8 @@ pub(super) fn values_per_zone(data_type: DataType) -> usize {
 #[inline]
 fn bin(v: f64, first: f64, bins: usize) -> Option<usize> {
     // Saturating: below `first` and NaN give 0, which fails the round trip.
-    let bin = (v - first) as usize;
-    (bin < bins && (first + bin as f64).to_bits() == v.to_bits()).then_some(bin)
+    let index = (v - first) as usize;
+    (index < bins && (first + index as f64).to_bits() == v.to_bits()).then_some(index)
 }
 
 /// The integers radix-sorted keys stand for, from `RADIX_FIRST`: every value of an 8- or 16-bit
@@ -555,12 +555,11 @@ impl Accumulator {
     /// Adds a value without weight, unless it is nodata or not finite: whether it counts.
     #[inline]
     fn add_value(&mut self, v: f64, nodata: Option<f64>, data_type: DataType, coverage: f64, plan: &Plan<'_>) -> bool {
-        if !(v.is_finite() && crate::histogram::is_valid(v, nodata, data_type)) {
+        // A pixel without coverage (which `spans` leaves out) counts nowhere: the histogram drops
+        // zero-weight bins, which the lists would keep.
+        if !(coverage > 0.0 && v.is_finite() && crate::histogram::is_valid(v, nodata, data_type)) {
             return false;
         }
-        // The histogram drops zero-weight bins, which the lists keep: they agree as `spans` never
-        // gives a coverage of 0.
-        debug_assert!(coverage > 0.0);
         self.summary.add(v, coverage, plan.moments);
         if plan.keep_values {
             if let Some(h) = &mut self.histogram
@@ -915,6 +914,26 @@ mod tests {
         assert!(Accumulator::new(&plan, 1 << 20, DataType::F32).histogram.is_none());
         // Nothing kept without a statistic that needs values.
         assert!(Accumulator::new(&Plan::new(&[Statistic::Mean], false, &[0]), 1 << 20, DataType::U8).histogram.is_none());
+    }
+
+    /// A pixel without coverage counts in neither the histogram nor the lists, so both agree.
+    #[test]
+    fn pixels_without_coverage_count_nowhere() {
+        use super::Accumulator;
+        let stats = [Statistic::Count, Statistic::Median, Statistic::Mode, Statistic::Variety];
+        for fractional in [false, true] {
+            let plan = Plan::new(&stats, fractional, &[0]);
+            let summarize = |data_type| {
+                let mut acc = Accumulator::new(&plan, 256, data_type);
+                for (v, coverage) in [(3.0, 1.0), (5.0, 0.5), (7.0, 0.0), (9.0, -0.25), (11.0, f64::NAN)] {
+                    assert_eq!(acc.add_value(v, None, data_type, coverage, &plan), coverage > 0.0, "{v}");
+                }
+                let bins = acc.bins(fractional);
+                stats.iter().map(|&s| acc.stat(s, &plan, &bins, &super::cumulative(&bins))).collect::<Vec<_>>()
+            };
+            // U8 counts in a histogram; F64 lists its values.
+            assert_eq!(summarize(DataType::U8), summarize(DataType::F64), "fractional {fractional}");
+        }
     }
 
     /// A pixel count saturated to `usize::MAX` (a zone over 2^32 pixels on a 32-bit target) gets
