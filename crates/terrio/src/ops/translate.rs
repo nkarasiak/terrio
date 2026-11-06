@@ -213,10 +213,11 @@ pub fn translate(ds: &RasterDataset, o: &TranslateOptions) -> Result<RasterDatas
     for (k, &b) in bands.iter().enumerate() {
         let src_nodata = ds.band_nodata(b);
         let values = super::BandView::of(r, b - 1);
-        let valid: Option<Vec<bool>> = src_nodata.map(|nd| values.valid(nd));
+        // Rescaling and resampling skip invalid pixels; a nearest-neighbour read copies them.
+        let valid: Option<Vec<bool>> = if complex || !nearest { src_nodata.map(|nd| values.valid(nd)) } else { None };
         let read = SourceRead {
             values,
-            valid: if complex || !nearest { valid.as_deref() } else { None },
+            valid: valid.as_deref(),
             width: r.cols,
             height: r.rows,
             src_type: r.data_type,
