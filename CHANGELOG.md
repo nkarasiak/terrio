@@ -27,7 +27,7 @@
   written, so a write interrupted partway (the process killed, the disk full) leaves no such file
   that opens as a raster of old and new bytes (HGT, recognised by its size, can be left so), and one
   that fails with an error leaves it empty; one that fails before the file is opened (a
-  whole-raster encoding error, a data file it cannot open or a header sidecar it cannot empty)
+  whole-raster encoding error, a data file or header sidecar it cannot open)
   leaves it as it was, and a sidecar failing after its data file is finished leaves the new data.
   A path that is not a regular file (a device such as `/dev/null`, a FIFO) is written as
   before, without truncation. Rewriting a 170 MB GeoTIFF eight times takes a steady 0.22 s each,

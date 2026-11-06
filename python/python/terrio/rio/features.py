@@ -327,14 +327,11 @@ def rasterize(
             out[touched] = (out[touched].astype(np.float64) + sums[touched]).astype(out.dtype)
         else:
             burnt = _burn_values(values, out.dtype)
-            # Compared as bytes, so -0.0 and 0.0 differ and one NaN equals itself (object values,
-            # which have no bytes, as values).
-            if burnt.dtype.kind == "O":
-                same = burnt == burnt[0]
-            else:
-                bits = burnt.view(np.uint8).reshape(len(burnt), -1)
-                same = bits == bits[0]
-            if same.all():
+            # Compared as bytes, so -0.0 and 0.0 differ and one NaN equals itself (object values
+            # are the floats _burn_values made).
+            exact = burnt.astype(np.float64) if burnt.dtype.kind == "O" else burnt
+            bits = exact.view(np.uint8).reshape(len(exact), -1)
+            if (bits == bits[0]).all():
                 # One value (masks, `default_value`): burn the coverage as bytes, not as feature
                 # numbers (a raster 8 times smaller) gathered back into values.
                 ones = [1] * len(geoms)

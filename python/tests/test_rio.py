@@ -632,6 +632,19 @@ def test_rasterize_overlapping_shapes_match_burning_one_by_one(values, dtype):
         np.testing.assert_array_equal(np.signbit(got), np.signbit(want))
 
 
+def test_rasterize_keeps_the_sign_of_zero_in_object_values():
+    # Decimal values give an object raster; -0 and 0 are two values, and the last shape wins.
+    from decimal import Decimal
+
+    T = Affine(1, 0, 0, 0, -1, 10)
+    first = {"type": "Polygon", "coordinates": [[(0, 10), (6, 10), (6, 4), (0, 4), (0, 10)]]}
+    last = {"type": "Polygon", "coordinates": [[(2, 8), (8, 8), (8, 2), (2, 2), (2, 8)]]}
+    got = features.rasterize(
+        [(first, Decimal("-0")), (last, Decimal("0"))], out_shape=(10, 10), transform=T
+    )
+    assert math.copysign(1, got[0, 0]) == -1 and math.copysign(1, got[4, 4]) == 1
+
+
 def test_rasterize_burns_values_as_rasterio():
     # rasterio 1.5.2 (GDAL) burns values through float64: NaN as 0, rounded half away from zero,
     # clamped to an integer dtype's range, overflowing floats to infinity. Recorded with rasterio
