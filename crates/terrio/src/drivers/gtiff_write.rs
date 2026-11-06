@@ -1977,8 +1977,8 @@ impl GeoTiffWriter {
     /// When the data is not of the raster's data type or does not hold `rows` rows of every band,
     /// rows go past the raster's height, the file has a mask and `mask` does not hold its rows, a
     /// mask is given for a COG without one, or the file cannot be written. A GeoTIFF other than a
-    /// COG checks only the data type when `rows` is zero, and refuses rows once a block row failed
-    /// to be written.
+    /// COG refuses any call once a block row failed to be written, and otherwise checks only the
+    /// data type when `rows` is zero.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
             RowWriter::Tiff(t) => t.write_rows(data, rows, mask),
@@ -2122,7 +2122,7 @@ impl TiffRows {
     /// height, the file has a mask and `mask` does not hold its rows, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         if self.failed {
-            return Err(Error::InvalidArgument("a block row of the GeoTIFF failed to be written".into()));
+            return Err(Error::InvalidData("a block row of the GeoTIFF failed to be written".into()));
         }
         if data.data_type() != self.data_type {
             return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
@@ -2248,7 +2248,7 @@ impl TiffRows {
     /// When rows are missing, a block row failed to be written, or the file cannot be written.
     pub fn finish(mut self) -> Result<()> {
         if self.failed {
-            return Err(Error::InvalidArgument("a block row of the GeoTIFF failed to be written".into()));
+            return Err(Error::InvalidData("a block row of the GeoTIFF failed to be written".into()));
         }
         if self.rows_written() != self.rows {
             return Err(Error::InvalidArgument(format!("{} rows written of {}", self.rows_written(), self.rows)));
@@ -3092,6 +3092,13 @@ mod tests {
         w.pos = pos;
         assert!(w.write_rows(&slice_rows(&raster.data, 35, 20..35, 65, 1), 15, None).is_err());
         assert_eq!(w.rows_written(), 20);
+        drop(w);
+        // A last block row that fails: its rows are all given, yet the file would miss them.
+        let mut w = TiffRows::create(path.to_str().unwrap(), &header, &options).unwrap();
+        w.write_rows(&slice_rows(&raster.data, 35, 0..16, 65, 1), 16, None).unwrap();
+        w.pos = u64::from(u32::MAX);
+        assert!(w.write_rows(&slice_rows(&raster.data, 35, 16..35, 65, 1), 19, None).is_err());
+        assert_eq!(w.rows_written(), 35);
         assert!(w.finish().is_err());
     }
 
