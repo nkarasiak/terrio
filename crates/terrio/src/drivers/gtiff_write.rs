@@ -1972,7 +1972,7 @@ impl GeoTiffWriter {
     ///
     /// # Errors
     /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
-    /// rows go past the raster's height, a mask is given for a file without one, or the file
+    /// rows go past the raster's height, a mask is given for a COG without one, or the file
     /// cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
@@ -2140,7 +2140,8 @@ impl TiffRows {
         }
         // Pending rows are kept band after band, in the raster's type; these rows follow them, or
         // are read where they are when none is pending.
-        let old = self.pending_rows;
+        // Taken with the pending rows: a write that fails leaves none pending.
+        let old = std::mem::take(&mut self.pending_rows);
         let (cols, bands) = (self.cols, self.bands);
         let data_type = self.data_type;
         let empty = || RasterData::new_filled(data_type, 0, 0.0);
@@ -2155,15 +2156,22 @@ impl TiffRows {
         // the rows left over, kept for the next call.
         let total = old + rows;
         let start = if self.rows_done + total == self.rows { total } else { total / self.block_rows * self.block_rows };
-        if start == 0 {
-            self.pending = all.into_owned();
+        let written = if start == 0 {
+            Ok(all.into_owned())
         } else if start == total {
-            self.flush_block_rows(all, start)?;
-            self.pending = empty();
+            self.flush_block_rows(all, start).map(|()| empty())
         } else {
             // The rows left over are copied once the slab is written and freed.
-            self.flush_block_rows(std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands)), start)?;
-            self.pending = slice_rows(&all, total, start..total, cols, bands);
+            let slab = std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands));
+            self.flush_block_rows(slab, start).map(|()| slice_rows(&all, total, start..total, cols, bands))
+        };
+        match written {
+            Ok(rest) => self.pending = rest,
+            Err(e) => {
+                // Their mask rows go with the rows dropped.
+                self.pending_mask.clear();
+                return Err(e);
+            }
         }
         if self.mask.is_some() {
             self.pending_mask.drain(..start * cols);

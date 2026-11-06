@@ -222,10 +222,10 @@ fn internal_masks_and_rows_written_in_order() {
             header.raster.data = RasterData::U8(Vec::new());
             let mut w = GeoTiffWriter::create(rows.to_str().unwrap(), &header, &o).unwrap();
             let band = 50 * 40;
-            // Rows of another type are refused, their mask rows with them.
-            assert!(w.write_rows(&RasterData::F32(vec![0.0; 50 * 3]), 1, Some(&mask[..50])).is_err());
             for y in (0..40).step_by(step) {
                 let n = step.min(40 - y);
+                // Rows of another type are refused, their mask rows with them.
+                assert!(w.write_rows(&RasterData::F32(vec![0.0; 50 * 3]), 1, Some(&mask[y * 50..(y + 1) * 50])).is_err());
                 let mut chunk = Vec::new();
                 for b in 0..3 {
                     chunk.extend_from_slice(&ds.raster.data_u8().unwrap()[b * band + y * 50..b * band + (y + n) * 50]);

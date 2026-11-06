@@ -963,7 +963,7 @@ mod tests {
     fn translate_in_place_converts_as_a_copy() {
         let mut f32s = ds(3, 2);
         let RasterData::F32(v) = &mut f32s.raster.data else { panic!("not float32") };
-        (v[1], v[2]) = (f32::from_bits(0x7f80_0001), f32::from_bits(0xffc0_1234));
+        (v[1], v[2], v[3]) = (f32::from_bits(0x7f80_0001), f32::from_bits(0xffc0_1234), -1.0);
         let mut u64s = ds(3, 2);
         u64s.raster.data_type = DataType::U64;
         u64s.raster.data = RasterData::U64((1..12).map(|i| (1u64 << 53) + i).chain([u64::MAX]).collect());
@@ -983,9 +983,15 @@ mod tests {
             TranslateOptions { output_type: Some(DataType::F64), ..base.clone() },
             TranslateOptions { src_win: Some((1.0, 0.0, 2.0, 2.0)), ..base.clone() },
         ];
+        let at = |d: &RasterData| crate::pixel::with_data!(d, v => v.as_ptr() as usize);
         for d in [f32s, u64s] {
-            for o in &options {
-                let (copy, in_place) = (translate(&d, o).unwrap(), translate_owned(d.clone(), o).unwrap());
+            for (i, o) in options.iter().enumerate() {
+                let owned = d.clone();
+                let pixels = at(&owned.raster.data);
+                let (copy, in_place) = (translate(&d, o).unwrap(), translate_owned(owned, o).unwrap());
+                // The options copying every band in the source's type keep the pixels' buffer.
+                let kept = i < 2 || (i == 2 && d.raster.data_type == DataType::F32);
+                assert_eq!(at(&in_place.raster.data) == pixels, kept, "{o:?}");
                 assert_eq!(bits(&in_place.raster.data), bits(&copy.raster.data), "{:?} {o:?}", d.raster.data_type);
                 assert_eq!(in_place.band_nodata, copy.band_nodata);
                 assert_eq!(in_place.geo_transform(), copy.geo_transform());
