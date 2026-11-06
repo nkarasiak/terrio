@@ -1971,8 +1971,9 @@ impl GeoTiffWriter {
     /// type), and of the mask (0 for invalid pixels) when the file has one.
     ///
     /// # Errors
-    /// When the data does not hold `rows` rows of every band, rows go past the raster's height,
-    /// a mask is given for a file without one, or the file cannot be written.
+    /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
+    /// rows go past the raster's height, a mask is given for a file without one, or the file
+    /// cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
             RowWriter::Tiff(t) => t.write_rows(data, rows, mask),
@@ -2109,8 +2110,8 @@ impl TiffRows {
     /// type), and of the mask (0 for invalid pixels) when the file has one.
     ///
     /// # Errors
-    /// When the data does not hold `rows` rows of every band, rows go past the raster's height,
-    /// or the file cannot be written.
+    /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
+    /// rows go past the raster's height, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         if rows == 0 {
             return Ok(());
@@ -2127,6 +2128,9 @@ impl TiffRows {
                 self.cols
             )));
         }
+        if data.data_type() != self.data_type {
+            return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
+        }
         if self.mask.is_some() {
             let m = mask.ok_or_else(|| Error::InvalidArgument("the file has a mask: give its rows".into()))?;
             if m.len() != n {
@@ -2138,12 +2142,14 @@ impl TiffRows {
         // are read where they are when none is pending.
         let old = self.pending_rows;
         let (cols, bands) = (self.cols, self.bands);
+        let data_type = self.data_type;
+        let empty = || RasterData::new_filled(data_type, 0, 0.0);
         let all = if old > 0 {
-            std::borrow::Cow::Owned(append_rows(&self.pending, old, data, rows, cols, bands)?)
-        } else if data.data_type() == self.data_type {
-            std::borrow::Cow::Borrowed(data)
+            // Taken out, so that they are freed once copied.
+            let pending = std::mem::replace(&mut self.pending, empty());
+            std::borrow::Cow::Owned(append_rows(&pending, old, data, rows, cols, bands)?)
         } else {
-            return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
+            std::borrow::Cow::Borrowed(data)
         };
         // The complete block rows (and the last rows of the raster), compressed together, then
         // the rows left over, kept for the next call.
@@ -2151,20 +2157,16 @@ impl TiffRows {
         let start = if self.rows_done + total == self.rows { total } else { total / self.block_rows * self.block_rows };
         if start == 0 {
             self.pending = all.into_owned();
+        } else if start == total {
+            self.flush_block_rows(all, start)?;
+            self.pending = empty();
         } else {
-            let (slab, rest) = if start == total {
-                (all, RasterData::new_filled(self.data_type, 0, 0.0))
-            } else {
-                (
-                    std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands)),
-                    slice_rows(&all, total, start..total, cols, bands),
-                )
-            };
-            self.flush_block_rows(slab, start)?;
-            if self.mask.is_some() {
-                self.pending_mask.drain(..start * cols);
-            }
-            self.pending = rest;
+            // The rows left over are copied once the slab is written and freed.
+            self.flush_block_rows(std::borrow::Cow::Owned(slice_rows(&all, total, 0..start, cols, bands)), start)?;
+            self.pending = slice_rows(&all, total, start..total, cols, bands);
+        }
+        if self.mask.is_some() {
+            self.pending_mask.drain(..start * cols);
         }
         self.pending_rows = total - start;
         Ok(())

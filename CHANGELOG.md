@@ -3,10 +3,11 @@
 ## Unreleased
 
 - Lazy `translate` (`translate_lazy`, `translate_lazy_to_file` and the CLI's `translate`), reads
-  by window (`LazyRaster::read_resampled`) and GeoTIFFs written in rows
-  (`GeoTiffWriter::write_rows`, which streamed outputs use) copy pixels fewer times, with
+  by window (`LazyRaster::read_resampled`) and GeoTIFFs other than COGs written in rows
+  (`GeoTiffWriter::write_rows`, which streamed GeoTIFF outputs use) copy pixels fewer times, with
   byte-identical results. Translating a 14412 x 14412 float32 Deflate GeoTIFF to an uncompressed
-  GeoTIFF on one CPU takes 60% fewer page faults.
+  GeoTIFF on one CPU takes 60% fewer page faults. `GeoTiffWriter::write_rows` refuses rows of
+  another type before taking their mask rows, which a refused call left queued.
 - Dependencies with RustSec vulnerabilities leave the build. ctutils, zstd and zstd-safe move to
   releases that fix them (0.4.8, 0.13.4, 7.4.0). wbvector is built without its KMZ and OSM PBF
   readers, which terrio did not use for its drivers, so zip 0.6 and protobuf 2 (through
