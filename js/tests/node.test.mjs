@@ -3853,6 +3853,13 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
   assert.throws(() => stream.add(1, new Float64Array(w1 * h1)), /expected window 0/);
   stream.add(0, new Float64Array(w * h));
   assert.throws(() => reducer.stream().finish(), /windows/);
+  // A finish with windows missing keeps the stream: add them, then finish.
+  const early = reducer.stream();
+  const all = reducer.windows();
+  early.add(0, new Float64Array(w * h).fill(1));
+  assert.throws(() => early.finish(), new RegExp(`missing windows, 1 of ${all.length} added`));
+  for (const [i, [, , ww, hh]] of all.entries()) if (i > 0) early.add(i, new Float64Array(ww * hh).fill(1));
+  assert.ok(early.finish().count[0] > 0);
   for (const [options, message] of [[{stats: ["weighted_mean"]}, /weighted statistics need a weighting raster/], [{stats: ["nope"]}, /unknown zonal statistic/], [{stats: []}, /at least one/], [{nope: 1}, /unknown field/]]) {
     assert.throws(() => new terrio.ZonalReducer(zone, 300, 200, transform, "EPSG:4326", options), message);
   }
@@ -3876,7 +3883,12 @@ test("ZonalReducer and ZonalStream reject bad input", () => {
   assert.equal(names.length, 2);
   assert.throws(() => new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326"), /must have one layer, or name one with the layer option \(they have 2\)/);
   assert.equal(new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326", {layer: names[1]}).featureCount, 2);
-  assert.throws(() => new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326", {layer: "missing"}), /no zone layer named 'missing'/);
+  assert.throws(() => new terrio.ZonalReducer(both, 300, 200, transform, "EPSG:4326", {layer: "missing"}), /no layer named missing \(layers: /);
+  // A file of one layer also answers to its file name, as readers have it.
+  const named = new TextEncoder().encode(JSON.stringify({type: "FeatureCollection", name: "fields", features: [{type: "Feature", properties: {}, geometry: zone}]}));
+  for (const layer of ["fields", "map"]) {
+    assert.equal(new terrio.ZonalReducer({bytes: named, filename: "map.geojson"}, 300, 200, transform, "EPSG:4326", {layer}).featureCount, 1);
+  }
   // The zones have a CRS and the grid has none.
   assert.throws(() => new terrio.ZonalReducer(a, 300, 200, transform, undefined), /both declare a CRS/);
 });

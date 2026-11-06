@@ -291,7 +291,8 @@ struct ReducerOptions {
 /// reduces one band, fed the `windows()` in order.
 /// Options: stats (default count, min, max, mean, sum, stddev; not the weighted ones), allTouched,
 /// fractional, layer (of a dataset with several), stripRows (rows per window; give a tiled source's
-/// block height to read each block once).
+/// block height to read each block once). Not tSrs or decimalPlaces: the results are unrounded
+/// arrays.
 #[wasm_bindgen(js_name = ZonalReducer)]
 pub struct JsZonalReducer {
     inner: terrio::ops::zonal::ZonalReducer,
@@ -323,19 +324,19 @@ impl JsZonalReducer {
         };
         // Canonical names (`stddev` for `std`), as `zonalStats` names its fields.
         let names: Vec<String> = stats.iter().map(|s| s.name()).collect();
-        let mut layers = input_layers(zones)?;
-        let zones = match &a.layer {
-            Some(name) => {
-                layers.drain(..).find(|l| &l.name == name).ok_or_else(|| JsError::new(&format!("no zone layer named '{name}'")))?
-            }
-            None if layers.len() == 1 => layers.remove(0),
-            None => {
-                return Err(JsError::new(&format!(
-                    "the zones must have one layer, or name one with the layer option (they have {})",
-                    layers.len()
-                )));
-            }
+        // A named layer is selected as readers select it (a single-layer file also answers to its
+        // file name).
+        let mut layers = match &a.layer {
+            Some(name) => crate::ops::selected_input_layers(zones, std::slice::from_ref(name))?,
+            None => input_layers(zones)?,
         };
+        if layers.len() != 1 {
+            return Err(JsError::new(&format!(
+                "the zones must have one layer, or name one with the layer option (they have {})",
+                layers.len()
+            )));
+        }
+        let zones = layers.remove(0);
         let options = ZonalOptions { fractional: a.fractional, stats, all_touched: a.all_touched, ..Default::default() };
         let crs = crs.as_deref().map(terrio::crs::SpatialRef::parse).transpose().map_err(js_err)?.unwrap_or_default();
         let grid = Grid { cols: width, rows: height, geo_transform, crs };
@@ -392,7 +393,8 @@ pub struct JsZonalStream {
 #[wasm_bindgen(js_class = ZonalStream)]
 impl JsZonalStream {
     /// Adds window number `window` (of `ZonalReducer.windows()`): a typed array of its
-    /// `width * height` pixels, row after row. Windows must come in order.
+    /// `width * height` pixels, row after row. Windows must come in order; a wrong window or
+    /// length throws and leaves the stream unchanged.
     pub fn add(&mut self, window: f64, data: &JsValue) -> Result<(), JsError> {
         let window = whole("window", window)?;
         let stream = self.stream.as_mut().ok_or_else(|| JsError::new("the stream is finished"))?;
@@ -400,10 +402,13 @@ impl JsZonalStream {
     }
 
     /// The statistics, as `{name: Float64Array}` with one value per zone feature, in layer
-    /// order; NaN where a zone has no valid pixels (`count` and `variety` are then 0).
+    /// order; NaN where a zone has no valid pixels (`count` and `variety` are then 0). With
+    /// windows missing, throws and the stream takes them still.
     pub fn finish(&mut self) -> Result<js_sys::Object, JsError> {
         use terrio::FieldValue;
-        let stream = self.stream.take().ok_or_else(|| JsError::new("the stream is finished"))?;
+        // Taken only once it is complete: after a missing-windows error, the stream takes them.
+        self.stream.as_ref().ok_or_else(|| JsError::new("the stream is finished"))?.check_complete().map_err(js_err)?;
+        let stream = self.stream.take().expect("checked above");
         let out = js_sys::Object::new();
         for (name, column) in self.names.iter().zip(stream.finish().map_err(js_err)?) {
             let values: Vec<f64> = column

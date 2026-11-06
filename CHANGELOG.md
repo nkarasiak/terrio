@@ -17,6 +17,52 @@
   which of two values whose coverage sums tie within rounding is its mode or minority; on both
   benchmarks, with mode, minority, quantiles and variety, it changed no value and outputs are byte
   for byte the same.
+- Remote files read over HTTP(S) share one connection pool per process (up to 64 idle connections;
+  the /vsi file operations keep one pool per operation, as before), so files opened one after
+  another or from many threads reuse warm connections rather than each opening its own. The pool
+  is rebuilt when the timeout, connect timeout, user agent or proxy variables change, and in a
+  forked child, which never uses or closes the parent's connections. Opening a STAC item set of 10
+  Sentinel-2 dates x 4 bands over https on 32 threads took 18.6 s instead of 27.2 s (one run).
+- GeoTIFF: Deflate tiles and strips are decoded by terrio with `fdeflate` (pure Rust) when the file
+  and the host are little-endian and the samples are 8-, 16-, 32- or 64-bit integers (with or
+  without the horizontal predictor) or Float32 or Float64 without a predictor. YCbCr and WhiteIsZero
+  images, Float16 and complex samples, and RGB or CMYK images whose extra samples the `tiff` crate
+  misreads keep their previous decoders. A stream ending before the chunk's samples, or with a wrong
+  Adler-32 right after them, is an error; one cut in its trailer after the samples is read, as
+  libtiff with zlib reads it. All 121 tiles of a Sentinel-2 L2A band decode as the `tiff` crate
+  decodes them.
+- Dependencies with RustSec vulnerabilities leave the build. ctutils, zstd and zstd-safe move to
+  releases that fix them (0.4.8, 0.13.4, 7.4.0). wbvector is built without its KMZ and OSM PBF
+  readers, which terrio did not use for its drivers, so zip 0.6 and protobuf 2 (through
+  osmpbfreader 0.16) are no longer compiled; terrio reads OSM PBF with osmpbfreader 0.19 as
+  before. With `TERRIO_WBVECTOR_FALLBACK=YES`, a zip archive named for no driver (`.xml`
+  included) is still read as KMZ, now opened with terrio's zip 9: from the member the KMZ driver
+  reads (its first `doc.kml` in any case, else its first `.kml` member), decoded as the KMZ
+  driver decodes it, with wbvector's KML reader. An archive with two `doc.kml` members reads the
+  last one, where it read the first. Three kinds of archive that failed are read: one named
+  `.xml` with its members stored, one with its document in Latin-1, and one with an encrypted or
+  bzip2-compressed member before its document.
+- GRIB, netCDF, HDF5, WebP and SRTM tiles have no wbraster format any more, so wbraster's Zarr
+  reader never reads them. In a build with the `gdal` feature and without `grib`, a `.grib2` path
+  that is a Zarr store was decoded by wbraster's Zarr reader (ruzstd 0.8, RUSTSEC-2026-0344) with
+  no option set; the GDAL backend reads it now, as it reads GRIB files in such a build.
+- CI checks `Cargo.lock` against the RustSec advisory database (`cargo audit`, the `audit` job)
+  on every pull request and push to main. `.cargo/audit.toml` ignores the five advisories of zip
+  8.6.0 and ruzstd 0.8.3, which wbraster 0.2.1 requires, until a wbraster release depends on zip
+  9 and ruzstd 0.9.1; since an ignore covers every version of a crate, a second step fails when
+  the lockfile has any other vulnerability. Unmaintained and unsound crates are listed without
+  failing the check.
+- Warps with nearest or `average` resampling are faster, and so are bilinear warps past GDAL's
+  4-tap threshold (output pixels over 1/0.95 source pixels across in either direction, 2 or more
+  with `TERRIO_GDAL_COMPAT=3.13`); the arithmetic and its order are unchanged. Nearest from
+  EPSG:32615 to EPSG:32616 of an 1100 x 1100 uint16 Sentinel-2 window takes 12 ms of kernel time
+  instead of 29 (single-threaded).
+- A zero-length numeric, enum or compound attribute of a multidimensional dataset is `null`, as
+  GDAL 3.13.3's `gdalmdiminfo` prints it, where it was an empty list `[]`, in Rust, Python,
+  JavaScript and CLI results and in Zarr copies. A zero-length string attribute stays `[]`. A
+  netCDF snapshot leaves out these attributes and any empty list with no recorded native type,
+  as `gdalmdimtranslate -of netCDF` does, where it wrote an empty int64 attribute that read back
+  as `null`; a typed empty list is still written with its type.
 - `terrio.xarray` (`engine="terrio"`, `open_rasterio`) skips applying a band's scale and offset
   when they are 1 and 0, and applies them in place otherwise: reads with `mask_and_scale` take
   19% less time (8000 x 8000 float32).

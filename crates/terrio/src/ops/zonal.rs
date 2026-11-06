@@ -815,7 +815,8 @@ impl ZonalStream {
                 self.reducer.windows.len()
             )));
         };
-        if data.len() != w.width * w.height {
+        // Checked: on a 32-bit target, a window of 65,536 x 65,536 pixels wraps to 0.
+        if w.width.checked_mul(w.height) != Some(data.len()) {
             return Err(Error::InvalidArgument(format!(
                 "zonal stream: window {window} has {} pixels, expected {} x {}",
                 data.len(),
@@ -829,12 +830,27 @@ impl ZonalStream {
         Ok(())
     }
 
-    /// `[statistic][feature]`, features in layer order.
+    /// Whether every window was added: [`finish`](Self::finish) checks this first, so a caller
+    /// can check it without giving up the stream.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] if windows are missing.
+    pub fn check_complete(&self) -> Result<()> {
+        let windows = self.reducer.windows.len();
+        if self.next < windows {
+            return Err(Error::InvalidArgument(format!("zonal stream: missing windows, {} of {windows} added", self.next)));
+        }
+        Ok(())
+    }
+
+    /// `[statistic][feature]`, features in layer order.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] if windows are missing ([`check_complete`](Self::check_complete)).
     pub fn finish(self) -> Result<Vec<Vec<FieldValue>>> {
+        self.check_complete()?;
         Ok(self.state.finish(&self.reducer.index)?.swap_remove(0))
     }
 }
