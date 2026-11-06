@@ -2531,9 +2531,10 @@ with one byte for binary masks. On a complete 966×731 real NLCD window (706,146
 pixels), three local count-only runs used peak RSS 44.2–44.7 MiB for binary and
 49.6–50.6 MiB for fractional membership; median times were 0.068 and 0.080 s.
 These measurements include process overhead and are not portable thresholds.
-Requesting `median` additionally retains value/coverage pairs (16 bytes per
-contributing sample) in both membership modes. Binary coverage is always one;
-its median sample buffer previously used eight bytes per sample.
+Requesting `median` additionally keeps each zone's values (8 bytes per zone pixel
+and band, 16 with `--fractional`, as above), unless the zone is counted in a
+histogram (a zone of an 8- or 16-bit integer band with at least as many pixels as
+the type has values, see above).
 
 ## Vector datasets
 
