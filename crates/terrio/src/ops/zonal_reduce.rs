@@ -552,7 +552,8 @@ impl Accumulator {
         Ok(())
     }
 
-    /// Adds a value without weight, unless it is nodata or not finite: whether it counts.
+    /// Adds a value without weight, unless it is nodata, not finite or without coverage: whether it
+    /// counts.
     #[inline]
     fn add_value(&mut self, v: f64, nodata: Option<f64>, data_type: DataType, coverage: f64, plan: &Plan<'_>) -> bool {
         // A pixel without coverage (which `spans` leaves out) counts nowhere: the histogram drops
@@ -978,8 +979,6 @@ mod tests {
         }
     }
 
-    /// Zones of at least as many pixels as an 8- or 16-bit band has values are counted in a
-    /// histogram: the same results as the value lists of the same values in a Float64 band.
     /// A raster declared 8-bit whose strips come back as floats (half-integer values here, which a
     /// histogram cannot count) is reduced without histograms: `reduce_source` says so before
     /// listing them beyond the charge, and `zonal_stats` gives the float raster's results.
@@ -988,9 +987,10 @@ mod tests {
         let (cols, rows) = (40, 30);
         let mut layer = Layer::new("zones");
         layer.features.push(Feature { fid: 0, geometry: Some(Geometry::polygon(ring(0., 0., 40., 30.), vec![])), attributes: vec![] });
-        let pixels: Vec<f64> = (0..cols * rows).map(|i| (i % 37) as f64 + 0.5).collect();
+        // Three bands of different values, so that results out of band order would differ.
+        let pixels: Vec<f64> = (0..3 * cols * rows).map(|i| (i % 37 + 40 * (i / (cols * rows))) as f64 + 0.5).collect();
         let raster = |declared| {
-            let cfg = RasterConfig { cols, rows, data_type: DataType::F64, ..Default::default() };
+            let cfg = RasterConfig { cols, rows, bands: 3, data_type: DataType::F64, ..Default::default() };
             let mut ds = RasterDataset::new(Raster::from_data(cfg, pixels.clone()).unwrap(), false);
             ds.set_geo_transform([0.0, 1.0, 0.0, rows as f64, 0.0, -1.0]);
             ds.raster.data_type = declared;
@@ -1006,13 +1006,16 @@ mod tests {
         let expected = reduce_source(&index, &mut float, &bands, None, &plan, 7, 1, true).unwrap().unwrap();
         assert_eq!(reduce_source(&index, &mut declared_u8, &bands, None, &plan, 7, 1, false).unwrap().unwrap(), expected);
         let zonal = |raster: LazyRaster| {
-            let source = crate::ops::zonal::ZonalSource { raster: raster.into(), bands: vec![crate::ops::zonal::ZonalBand::new(1, "v")] };
+            let bands = (1..=3).map(|b| crate::ops::zonal::ZonalBand::new(b, format!("b{b}"))).collect();
+            let source = crate::ops::zonal::ZonalSource { raster: raster.into(), bands };
             let options = crate::ops::zonal::ZonalOptions { stats: stats.to_vec(), ..Default::default() };
             crate::ops::zonal::zonal_stats(&layer, &mut [source], &options).unwrap().features[0].attributes.clone()
         };
         assert_eq!(zonal(raster(DataType::U8)), zonal(raster(DataType::F64)));
     }
 
+    /// Zones of at least as many pixels as an 8- or 16-bit band has values are counted in a
+    /// histogram: the same results as the value lists of the same values in a Float64 band.
     #[test]
     fn counted_integer_bands_match_listed_float_bands() {
         let (cols, rows) = (400, 300);
