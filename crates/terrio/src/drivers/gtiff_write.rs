@@ -1971,9 +1971,10 @@ impl GeoTiffWriter {
     /// type), and of the mask (0 for invalid pixels) when the file has one.
     ///
     /// # Errors
-    /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
+    /// When the data is not of the raster's data type or does not hold `rows` rows of every band,
     /// rows go past the raster's height, the file has a mask and `mask` does not hold its rows, a
-    /// mask is given for a COG without one, or the file cannot be written.
+    /// mask is given for a COG without one, or the file cannot be written. A GeoTIFF other than a
+    /// COG checks only the data type when `rows` is zero.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
             RowWriter::Tiff(t) => t.write_rows(data, rows, mask),
@@ -2110,8 +2111,9 @@ impl TiffRows {
     /// type), and of the mask (0 for invalid pixels) when the file has one.
     ///
     /// # Errors
-    /// When the data does not hold `rows` rows of every band or is not of the raster's data type,
-    /// rows go past the raster's height, or the file cannot be written.
+    /// When the data is not of the raster's data type; with `rows` not zero, when it does not hold
+    /// `rows` rows of every band, rows go past the raster's height, the file has a mask and `mask`
+    /// does not hold its rows, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         if data.data_type() != self.data_type {
             return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
@@ -3056,8 +3058,8 @@ mod tests {
         }
     }
 
-    /// A GeoTIFF row write that fails keeps every row given so far pending, its mask rows with
-    /// them, and a later write fails the same way rather than panicking.
+    /// A GeoTIFF row write that fails keeps every row given so far pending, and a later write fails
+    /// the same way rather than panicking.
     #[test]
     fn failed_row_writes_keep_their_rows_pending() {
         let raster = overview_fixture(1, DataType::U8, RasterData::U8((0..65 * 35).map(|i| (i % 251) as u8).collect()));
