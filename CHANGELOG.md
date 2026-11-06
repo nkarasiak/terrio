@@ -25,7 +25,8 @@
   first 16 bytes, where formats with a signature put it, are zeroed at once and written last, and
   the header of a headerless data file (EHdr, ENVI, ERS, SAGA, RST) is emptied before the data is
   written, so a write interrupted partway (the process killed, the disk full) leaves no such file
-  that opens as a raster of old and new bytes, and one
+  that opens as a raster of old and new bytes (except through a stale ENVI `name.ext.hdr`, which
+  the reader prefers to the `name.hdr` written and which is left as it is), and one
   that fails with an error leaves it empty; one that fails before the file is opened (a
   whole-raster encoding error, a data file or header sidecar it cannot open)
   leaves it as it was, and a sidecar failing after its data file is finished leaves the new data.
