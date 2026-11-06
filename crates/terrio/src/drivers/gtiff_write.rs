@@ -1923,6 +1923,9 @@ struct TiffRows {
     pending_mask: Vec<u8>,
     pending_rows: usize,
     rows_done: usize,
+    /// Whether a block row failed to be written: the file is incomplete, and nothing more is
+    /// written to it.
+    failed: bool,
     tags: Vec<(u16, Value)>,
     /// The internal mask's compressed chunks, written after the image data.
     mask: Option<Vec<Vec<u8>>>,
@@ -1974,7 +1977,8 @@ impl GeoTiffWriter {
     /// When the data is not of the raster's data type or does not hold `rows` rows of every band,
     /// rows go past the raster's height, the file has a mask and `mask` does not hold its rows, a
     /// mask is given for a COG without one, or the file cannot be written. A GeoTIFF other than a
-    /// COG checks only the data type when `rows` is zero.
+    /// COG checks only the data type when `rows` is zero, and refuses rows once a block row failed
+    /// to be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
         match &mut self.inner {
             RowWriter::Tiff(t) => t.write_rows(data, rows, mask),
@@ -1989,7 +1993,8 @@ impl GeoTiffWriter {
     /// Writes the directories (and the COG's levels) and closes the file.
     ///
     /// # Errors
-    /// When rows are missing, or the file cannot be written.
+    /// When rows are missing, a block row of a GeoTIFF other than a COG failed to be written, or
+    /// the file cannot be written.
     pub fn finish(self) -> Result<()> {
         match self.inner {
             RowWriter::Tiff(t) => (*t).finish(),
@@ -2097,6 +2102,7 @@ impl TiffRows {
             pending_mask: Vec::new(),
             pending_rows: 0,
             rows_done: 0,
+            failed: false,
             tags,
             mask: with_mask.then(Vec::new),
         })
@@ -2111,10 +2117,13 @@ impl TiffRows {
     /// type), and of the mask (0 for invalid pixels) when the file has one.
     ///
     /// # Errors
-    /// When the data is not of the raster's data type; with `rows` not zero, when it does not hold
-    /// `rows` rows of every band, rows go past the raster's height, the file has a mask and `mask`
-    /// does not hold its rows, or the file cannot be written.
+    /// When a block row failed to be written, or the data is not of the raster's data type; with
+    /// `rows` not zero, when it does not hold `rows` rows of every band, rows go past the raster's
+    /// height, the file has a mask and `mask` does not hold its rows, or the file cannot be written.
     pub fn write_rows(&mut self, data: &RasterData, rows: usize, mask: Option<&[u8]>) -> Result<()> {
+        if self.failed {
+            return Err(Error::InvalidArgument("a block row of the GeoTIFF failed to be written".into()));
+        }
         if data.data_type() != self.data_type {
             return Err(Error::InvalidArgument("the rows are not of the raster's data type".into()));
         }
@@ -2172,9 +2181,11 @@ impl TiffRows {
             self.flush_block_rows(&slab, start)
         };
         if let Err(e) = written {
-            // Every row given so far stays pending, as before the write.
+            // Every row given so far stays pending, as before the write, and nothing more is
+            // written: the file may hold part of the block row.
             self.pending = all.into_owned();
             self.pending_rows = total;
+            self.failed = true;
             return Err(e);
         }
         self.pending = match start {
@@ -2234,8 +2245,11 @@ impl TiffRows {
     /// Writes the image's directory (and the mask's) and closes the file.
     ///
     /// # Errors
-    /// When rows are missing, or the file cannot be written.
+    /// When rows are missing, a block row failed to be written, or the file cannot be written.
     pub fn finish(mut self) -> Result<()> {
+        if self.failed {
+            return Err(Error::InvalidArgument("a block row of the GeoTIFF failed to be written".into()));
+        }
         if self.rows_written() != self.rows {
             return Err(Error::InvalidArgument(format!("{} rows written of {}", self.rows_written(), self.rows)));
         }
@@ -3058,10 +3072,10 @@ mod tests {
         }
     }
 
-    /// A GeoTIFF row write that fails keeps every row given so far pending, and a later write fails
-    /// the same way rather than panicking.
+    /// A GeoTIFF row write that fails keeps every row given so far pending, and the writer then
+    /// refuses more rows and to finish, whose file would miss the block row.
     #[test]
-    fn failed_row_writes_keep_their_rows_pending() {
+    fn failed_row_writes_stop_the_writer() {
         let raster = overview_fixture(1, DataType::U8, RasterData::U8((0..65 * 35).map(|i| (i % 251) as u8).collect()));
         let mut header = crate::RasterDataset::new(raster.clone(), false);
         header.raster.data = RasterData::U8(Vec::new());
@@ -3071,12 +3085,14 @@ mod tests {
         let mut w = TiffRows::create(path.to_str().unwrap(), &header, &options).unwrap();
         w.write_rows(&slice_rows(&raster.data, 35, 0..10, 65, 1), 10, None).unwrap();
         // Past what a classic TIFF addresses: the block row is refused once written.
-        w.pos = u64::from(u32::MAX);
-        let rows = slice_rows(&raster.data, 35, 10..20, 65, 1);
-        assert!(w.write_rows(&rows, 10, None).is_err());
+        let pos = std::mem::replace(&mut w.pos, u64::from(u32::MAX));
+        assert!(w.write_rows(&slice_rows(&raster.data, 35, 10..20, 65, 1), 10, None).is_err());
         assert_eq!((w.rows_written(), w.pending_rows, w.pending.len()), (20, 20, 65 * 20));
-        assert!(w.write_rows(&slice_rows(&raster.data, 35, 20..30, 65, 1), 10, None).is_err());
-        assert_eq!(w.rows_written(), 30);
+        // Within the limit again, the writer still refuses: the file may hold part of the row.
+        w.pos = pos;
+        assert!(w.write_rows(&slice_rows(&raster.data, 35, 20..35, 65, 1), 15, None).is_err());
+        assert_eq!(w.rows_written(), 20);
+        assert!(w.finish().is_err());
     }
 
     /// Invalid slabs must fail before consuming rows or changing the native overview state.

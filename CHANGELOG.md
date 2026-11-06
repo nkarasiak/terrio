@@ -8,7 +8,9 @@
   when the rows given end a block row or the raster, with byte-identical results. Translating a
   14412 x 14412 float32 Deflate GeoTIFF to an uncompressed GeoTIFF on one CPU takes 62% fewer
   page faults. `GeoTiffWriter::write_rows` refuses rows of another type, even none, before taking
-  their mask rows, which a refused call left queued.
+  their mask rows, which a refused call left queued. Once a block row of a GeoTIFF other than a
+  COG fails to be written, the writer refuses more rows and `finish`, which could write a file
+  missing it.
 - `terrio dem` (Python `terrio.dem`, JavaScript `dem`) computes most of its 3×3 products a row at a
   time, with AVX2 where the CPU has it, and most rows holding nodata no longer fall back to one
   pixel at a time. Some products take their arctangents from fdlibm (credited in `NOTICE`,
