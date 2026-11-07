@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- `terrio translate` reads the bands of a window it copies pixel for pixel together, whichever
+  bands they are. It used to read bands that are not the source's first ones in order one by one,
+  as `gdal_translate`'s virtual dataset does, and without GDAL's block cache a Zarr chunk holding
+  many bands was then fetched and decoded once per band. One year (128 bands) of a 192 x 192
+  window of the TESSERA embeddings store on source.coop, its chunks holding 128 bands, took over
+  2 minutes and about 560 MB. It now takes about 6 s and 5.2 MB in 20 requests.
+- Opening a remote Zarr store requests its v2 consolidated metadata (`.zmetadata`) and its root
+  `zarr.json` at once, and, in a Zarr v3 store, no longer looks for v2 documents (`.zarray`,
+  `.zattrs`, `.zgroup`). The coordinate arrays that describe the band dimensions are read in
+  parallel. Opening that TESSERA array went from 13 requests in a row to 4 round trips.
+- A sharded Zarr array keeps the indexes of the shards it has read while it is open (up to 64 MB
+  of entries), as zarrita and GDAL do: a later window in the same shard fetches only its inner
+  chunks, where it fetched the shard's index again first (256 KB and a round trip for a TESSERA
+  shard of 128 x 128 inner chunks).
+- A window of a sharded Zarr array fetches nearby inner chunks in requests of at most 1 MiB, in
+  parallel, where they took up to 16 MiB each: a connection far from the server delivers a large
+  range slowly. Reading 34.5 MB of the TESSERA embeddings from Europe took a median 6.3 s instead
+  of 10.0 s (8 runs each), and the 192 x 192 window above 5.2 s instead of 6.4 s.
+
 - Python's `Raster.read_resampled`, `read_resampled_masks` and `read_resampled_with_masks`, and
   JavaScript's `readResampled`, `readResampledMasks` and `readResampledWithMasks` (on `Dataset`
   and, as promises, on `openUrl`'s `RemoteDataset`), read a window of some bands into an output

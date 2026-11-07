@@ -282,6 +282,10 @@ fn sharded_stores_read_only_the_inner_chunks_needed() {
     assert!(bytes < shard_size / 4, "{bytes} of {shard_size}");
     assert_eq!(w.raster.get(0, 0, 0), value(30, 40) as f64);
     assert_eq!(w.raster.get(0, 9, 19), value(39, 59) as f64);
+    // Another window of the shard: its index is kept, so one request for the inner chunks.
+    let w = r.read_window(Window::new(70, 90, 8, 8), &WindowOptions::default()).unwrap();
+    assert_eq!(counter.take().0, 1);
+    assert_eq!(w.raster.get(0, 7, 7), value(97, 77) as f64);
     // The whole array, the missing inner chunk filled.
     let all = r.read().unwrap();
     for (row, col) in [(0, 0), (199, 299), (150, 290), (48, 80), (63, 95)] {
@@ -369,6 +373,40 @@ fn cmip6_on_gcs_as_gdal_reads_it() {
     // gdallocationinfo -valonly -b 1980 ... 100 50 → 286.898071289062 (rows from the south).
     let w = r.read_window(Window::new(100, 179 - 50, 1, 1), &WindowOptions { bands: vec![1980], overview: None }).unwrap();
     assert_eq!(w.raster.get(0, 0, 0), 286.898_07_f32 as f64);
+}
+
+/// Embeddings stored as TESSERA stores them: every band of a pixel in one chunk. Translating a
+/// window of bands that are not the first ones (one year of `(time, band, y, x)`) fetches the
+/// chunk once, not once per band.
+#[test]
+fn translated_bands_sharing_a_chunk_fetch_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("e.zarr");
+    std::fs::create_dir_all(store.join("a/c/0/0")).unwrap();
+    std::fs::write(store.join("zarr.json"), r#"{"zarr_format": 3, "node_type": "group", "attributes": {}}"#).unwrap();
+    let meta = serde_json::json!({
+        "zarr_format": 3, "node_type": "array", "shape": [8, 16, 16], "data_type": "int8",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [8, 16, 16]}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0, "dimension_names": ["band", "y", "x"],
+        "attributes": {"spatial:transform": [10.0, 0.0, 500000.0, 0.0, -10.0, 4600000.0], "proj:code": "EPSG:32630"},
+        "codecs": [{"name": "bytes"}]
+    });
+    std::fs::write(store.join("a/zarr.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
+    // Band b (from 0) holds b * 10 + row.
+    let chunk: Vec<u8> = (0..8).flat_map(|b| (0..16).flat_map(move |r| [(b * 10 + r) as u8; 16])).collect();
+    std::fs::write(store.join("a/c/0/0/0"), chunk).unwrap();
+    let (url, counter) = serve(dir.path().to_path_buf());
+    let mut src = terrio::open_raster_lazy(&format!("ZARR:\"{url}/e.zarr\":/a")).unwrap();
+    counter.take();
+    let o = terrio::ops::translate::TranslateOptions { src_win: Some((2.0, 3.0, 4.0, 5.0)), bands: vec![5, 6, 7, 8], ..Default::default() };
+    let out = terrio::ops::translate::translate_lazy(&mut src, &o, terrio::ops::overview::OverviewSelection::Auto).unwrap();
+    assert_eq!(counter.take().0, 1);
+    assert_eq!(out.raster.bands, 4);
+    for k in 0..4 {
+        assert_eq!(out.raster.get(k, 0, 0), ((k + 4) * 10 + 3) as f64);
+        assert_eq!(out.raster.get(k, 4, 3), ((k + 4) * 10 + 7) as f64);
+    }
 }
 
 #[test]
