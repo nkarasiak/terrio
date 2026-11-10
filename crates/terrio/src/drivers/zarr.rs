@@ -906,8 +906,12 @@ fn repeated(fill: &[u8], n: usize, what: &str) -> Result<Vec<u8>> {
     }
     let mut out = Vec::new();
     crate::dataset::fallible::reserve(&mut out, len, what)?;
-    for _ in 0..n {
+    // Doubling: a few large copies rather than one per element.
+    if n > 0 {
         out.extend_from_slice(fill);
+    }
+    while out.len() < len {
+        out.extend_from_within(..out.len().min(len - out.len()));
     }
     Ok(out)
 }
@@ -1807,6 +1811,13 @@ impl Level {
                 crate::dataset::fallible::reserve(&mut out, len, "a Zarr window")?;
                 for &offset in &band_offsets {
                     for r in 0..w.height {
+                        if xs == 1 {
+                            // Columns are the last dimension: a row is contiguous, converted in one pass.
+                            let i = index(offset, r, 0);
+                            let row = bytes[i..i + w.width * size].chunks_exact(size);
+                            out.extend(row.map(|e| <$t>::from_le_bytes(e.try_into().unwrap_or_default())));
+                            continue;
+                        }
                         for c in 0..w.width {
                             let i = index(offset, r, c);
                             out.push(<$t>::from_le_bytes(bytes[i..i + size].try_into().unwrap_or_default()));
@@ -2855,6 +2866,15 @@ pub(crate) fn write_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_fill_is_n_copies_of_the_element() {
+        for n in [0, 1, 2, 3, 7, 1000] {
+            let fill = [1u8, 2, 3];
+            assert_eq!(repeated(&fill, n, "test").unwrap(), fill.repeat(n), "n = {n}");
+        }
+        assert_eq!(repeated(&[0, 0], 5, "test").unwrap(), vec![0; 10]);
+    }
 
     #[test]
     fn parallel_coordinates_keep_the_callers_chunk_policy_for_absent_chunks() {
