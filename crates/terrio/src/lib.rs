@@ -252,6 +252,9 @@ mod dataset;
 pub mod dataset_files;
 mod deflate_compress;
 mod drivers;
+#[cfg(feature = "zarr")]
+#[doc(hidden)]
+pub use drivers::zarr::spike_read;
 #[cfg(test)]
 mod entry_allow_list_tests;
 mod error;

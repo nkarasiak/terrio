@@ -1649,6 +1649,9 @@ fn geozarr(attrs: &[&Value], shape: impl Fn(&str, &str) -> Option<(usize, usize)
 /// samples' `proj:epsg`).
 fn proj_crs(a: &Value) -> Option<CrsInfo> {
     use crate::crs::SpatialRef;
+    if a.is_object() {
+        return None; // SPIKE: no CRS engine
+    }
     let s = if let Some(code) = a["proj:code"].as_str() {
         SpatialRef::parse(code).ok()?
     } else if let Some(code) = a["proj:epsg"].as_u64() {
@@ -1974,7 +1977,7 @@ fn open_node(node: &Node, list_subdatasets: bool) -> Result<(RasterDataset, Zarr
         }
         None
     };
-    if let Some(gm) = array.attrs["grid_mapping"].as_str().and_then(sibling) {
+    if let Some(gm) = array.attrs["grid_mapping"].as_str().and_then(sibling).filter(|_| false) {
         if crs.is_none() {
             // Its WKT, or its CF parameters (as GDAL reads them).
             let numbers = |k: &str| match &gm.attrs[k] {
@@ -2017,7 +2020,7 @@ fn open_node(node: &Node, list_subdatasets: bool) -> Result<(RasterDataset, Zarr
         && let Some(g) = &group
     {
         // GDAL's Zarr v3 writer keeps the CRS in a sidecar inside the store.
-        crs = g.get("pam.aux.xml", Range::Whole).ok().flatten().and_then(|b| common::parse_pam(&String::from_utf8_lossy(&b)).crs);
+        let _ = g; // SPIKE: no PAM CRS
     }
     let south_up = gt.is_some_and(|g| g[5] > 0.0);
     let gt = gt.unwrap_or(common::NO_GEOTRANSFORM);
@@ -2246,6 +2249,9 @@ pub(crate) fn open_named(name: &str) -> Option<Result<RasterDataset>> {
 
 /// The CRS of a GDAL `_CRS` attribute: its URL, PROJJSON identifier or WKT.
 fn crs_attribute(v: &Value) -> Option<CrsInfo> {
+    if v.is_object() || !v.is_object() {
+        return None; // SPIKE: no CRS engine
+    }
     if let Some(code) = v["url"].as_str().and_then(|u| u.rsplit('/').next()).and_then(|c| c.parse::<u32>().ok()) {
         return Some(crate::crs::epsg_crs_info(code));
     }
@@ -3465,4 +3471,15 @@ mod tests {
             assert_eq!(t.as_str(), name);
         }
     }
+}
+
+/// SPIKE (size measurement only): open and read one band of a window, no `LazyRaster`.
+#[doc(hidden)]
+pub fn spike_read(objects: std::sync::Arc<crate::sparse::SparseObjects>, name: &str, key: &str, band: usize, w: crate::Window) -> Result<RasterData> {
+    let node = Node::sparse(objects.clone(), name, key)?;
+    let (_, mut source) = open_node(&node, false)?;
+    if objects.has_missing() {
+        return Err(bad("objects missing"));
+    }
+    crate::cog::WindowSource::read(&mut source, 0, w, &[band])
 }
