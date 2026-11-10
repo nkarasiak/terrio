@@ -1,0 +1,82 @@
+# Size spike (issue nkarasiak/terrio#22, plan item 3): the smallest wasm module that runs terrio's
+# own Zarr read path (open + window read over fetched objects), every other export left out, so
+# LTO drops the rest of terrio. Its size is the floor before a `terrio-zarr` core is extracted.
+[package]
+name = "zarr-size-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+terrio = { path = "../../crates/terrio", default-features = false, features = ["zarr"] }
+wasm-bindgen = "0.2"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+[profile.release.package.openjp2]
+opt-level = 3
+[profile.release.package.tiff]
+opt-level = 3
+[profile.release.package.weezl]
+opt-level = 3
+[profile.release.package.fdeflate]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.zlib-rs]
+opt-level = 3
+[profile.release.package.simd-adler32]
+opt-level = 3
+[profile.release.package.crc32fast]
+opt-level = 3
+[profile.release.package.jpeg-decoder]
+opt-level = 3
+[profile.release.package.zune-jpeg]
+opt-level = 3
+[profile.release.package.zune-jpegxl]
+opt-level = 3
+[profile.release.package.jxl-vardct]
+opt-level = 3
+[profile.release.package.jxl-modular]
+opt-level = 3
+[profile.release.package.jxl-render]
+opt-level = 3
+[profile.release.package.jxl-frame]
+opt-level = 3
+[profile.release.package.jxl-coding]
+opt-level = 3
+[profile.release.package.jxl-grid]
+opt-level = 3
+[profile.release.package.ruzstd]
+opt-level = 3
+[profile.release.package.lerc-core]
+opt-level = 3
+[profile.release.package.lerc-reader]
+opt-level = 3
+[profile.release.package.lerc-writer]
+opt-level = 3
+[profile.release.package.lzma-rust2]
+opt-level = 3
+[profile.release.package.laz]
+opt-level = 3
+[profile.release.package.rusty_av1d]
+opt-level = 3
+[profile.release.package.image-webp]
+opt-level = 3
+[profile.release.package.lz4_flex]
+opt-level = 3
+
+# Build and measure (results: docs/terrio-js-performance.md on perf/zarr-js-local-bench):
+#   wasm-pack build --release --no-opt --target nodejs --out-dir pkg
+#   wasm-opt -Oz --strip-debug --strip-producers --enable-bulk-memory \
+#     --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals \
+#     pkg/zarr_size_spike_bg.wasm -o pkg/zarr_size_spike_bg.wasm
+#   node check.mjs pkg <array directory of a local store> <x> <y> <width> <height>
