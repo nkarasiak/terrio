@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- terrio-js in Node.js, Deno and Bun fetches a long range of a remote file, such as a run of
+  adjacent COG tiles, as parallel pieces of at least 512 KiB rather than as one response at the
+  pace of one connection: the open and a 2048 x 2048 read of Sentinel-2 COGs on S3 us-west-2, from
+  Europe, took 2.6 s instead of 4.8 s. Browsers keep one request per range.
 - terrio-js: while a remote file opens (GeoTIFF, PMTiles, COPC, FlatGeobuf, GeoParquet), each
   request is at least as long as the bytes read so far, up to 4 MiB: a COG header of 655 KB
   (93456 x 52031 pixels) takes 4 requests instead of 8.

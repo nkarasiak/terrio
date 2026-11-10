@@ -32,6 +32,12 @@ const OPEN_GROWTH_MAX: u64 = 4 << 20;
 /// The most rounds of fetches a read may take.
 const MAX_ROUNDS: usize = 64;
 
+/// The least bytes of each piece a long range is split into in server runtimes
+/// (`sparse::split_long_ranges`): a single response is slow at a high round-trip time (1.9 MB from
+/// S3 us-west-2 to Europe: 3.1 s in one request), and pieces of this size or more keep the
+/// requests few.
+const SPLIT_RANGE_BYTES: u64 = 512 << 10;
+
 /// The range requests sent at once: browsers queue more, and servers may rate-limit them.
 const MAX_PARALLEL: usize = 12;
 
@@ -419,6 +425,11 @@ impl State {
             if self.reader.borrow().is_none() {
                 missing = sparse::grow_ranges(&missing, self.file.fetched().0.min(OPEN_GROWTH_MAX), block, self.file.len());
             }
+            // Long ranges in parallel pieces where requests are not queued (see `server_runtime`):
+            // in Chromium, which keeps 6 connections to S3, they did not read faster.
+            if server_runtime() {
+                missing = sparse::split_long_ranges(&missing, block, SPLIT_RANGE_BYTES, MAX_PARALLEL);
+            }
             let parts = self.objects.as_ref().map(|o| o.missing()).unwrap_or_default();
             if missing.is_empty() && parts.is_empty() {
                 self.file.trim(self.cache_size);
@@ -442,6 +453,14 @@ impl State {
 #[wasm_bindgen]
 pub struct RemoteDataset {
     state: Rc<State>,
+}
+
+/// Whether this runs in a server runtime (Node.js, Bun, Deno), whose `fetch` opens as many
+/// connections to a host as requests in flight, rather than in a browser, which keeps 6 to an
+/// HTTP/1.1 server and queues the rest.
+fn server_runtime() -> bool {
+    let global = js_sys::global();
+    get(&get(&get(&global, "process"), "versions"), "node").is_string() || !get(&global, "Deno").is_undefined()
 }
 
 /// The format of a file, from its name or first bytes.

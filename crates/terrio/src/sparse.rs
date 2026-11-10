@@ -350,6 +350,29 @@ pub fn read_with<T>(
     Err(crate::Error::InvalidData(format!("the read still needed more bytes after {rounds} fetch rounds")))
 }
 
+/// Splits each range `(offset, length)` of [`SparseFile::missing`] of at least twice `least` bytes
+/// into up to `most` near-equal pieces of whole `block`s, to fetch in parallel: a server sends each
+/// response at the pace of one connection, so a run of adjacent tiles fetched as one range is bound
+/// by it (terrio's HTTP reader splits its runs the same way).
+pub fn split_long_ranges(ranges: &[(u64, u64)], block: u64, least: u64, most: usize) -> Vec<(u64, u64)> {
+    let block = block.max(1);
+    let least = least.div_ceil(block).max(1);
+    ranges
+        .iter()
+        .flat_map(|&(offset, len)| {
+            let blocks = len.div_ceil(block);
+            let pieces = (blocks / least).clamp(1, most.max(1) as u64);
+            let (size, longer) = (blocks / pieces, blocks % pieces);
+            // the first `longer` pieces take one block more; the last may end in the file's short block
+            (0..pieces).map(move |k| {
+                let first = offset + (k * size + k.min(longer)) * block;
+                let end = (first + (size + u64::from(k < longer)) * block).min(offset + len);
+                (first, end - first)
+            })
+        })
+        .collect()
+}
+
 /// Grows each range `(offset, length)` of [`SparseFile::missing`] to at least `least` bytes, in
 /// whole `block`s within a file of `len` bytes, merging those that then overlap: a header read in
 /// steps (a TIFF's IFDs, one after another) takes requests that grow with what it read so far,
@@ -434,6 +457,16 @@ mod tests {
         assert_eq!(fetches, 2);
         f.trim(4096);
         assert!(f.lock().blocks.len() <= 4);
+    }
+
+    #[test]
+    fn a_long_range_splits_into_pieces_of_whole_blocks() {
+        let k = 1024;
+        // Under twice `least`: whole. 10 blocks of 1 KiB, least 3 KiB: 3 pieces of 4, 3, 3 blocks.
+        assert_eq!(split_long_ranges(&[(0, 5 * k)], k, 3 * k, 8), [(0, 5 * k)]);
+        assert_eq!(split_long_ranges(&[(k, 10 * k)], k, 3 * k, 8), [(k, 4 * k), (5 * k, 3 * k), (8 * k, 3 * k)]);
+        // At most `most` pieces; a range ending in the file's short last block keeps its end.
+        assert_eq!(split_long_ranges(&[(0, 9 * k + 10)], k, k, 2), [(0, 5 * k), (5 * k, 4 * k + 10)]);
     }
 
     #[test]
