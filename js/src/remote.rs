@@ -15,7 +15,7 @@ use std::rc::Rc;
 use terrio::formats::VectorDriver;
 #[cfg(feature = "pointcloud")]
 use terrio::pointcloud::PointCloudReader;
-use terrio::sparse::{ObjectRange, SparseFile, SparseObjects};
+use terrio::sparse::{self, ObjectRange, SparseFile, SparseObjects};
 #[cfg(feature = "tiles")]
 use terrio::tiles::TileArchive;
 #[cfg(feature = "flatgeobuf")]
@@ -26,8 +26,17 @@ use terrio::{LazyRaster, Window, WindowOptions};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+/// The most a request made while a file opens grows to (`sparse::grow_ranges`).
+const OPEN_GROWTH_MAX: u64 = 4 << 20;
+
 /// The most rounds of fetches a read may take.
 const MAX_ROUNDS: usize = 64;
+
+/// The least bytes of each piece a long range is split into in server runtimes
+/// (`sparse::split_long_ranges`): a single response is slow at a high round-trip time (1.9 MB from
+/// S3 us-west-2 to Europe: 3.1 s in one request), and pieces of this size or more keep the
+/// requests few.
+const SPLIT_RANGE_BYTES: u64 = 512 << 10;
 
 /// The range requests sent at once: browsers queue more, and servers may rate-limit them.
 const MAX_PARALLEL: usize = terrio::sparse::PARALLEL_REQUESTS;
@@ -452,7 +461,18 @@ impl State {
         let _turn = self.turn().await;
         for _ in 0..MAX_ROUNDS {
             let result = read(&mut self.reader.borrow_mut());
-            let missing = self.file.missing();
+            let mut missing = self.file.missing();
+            let block = self.file.block_size();
+            // Opening (no reader yet): requests grow with the header read so far, so that a large
+            // header (a COG's IFDs and tile tables) takes a few requests rather than one per block.
+            if self.reader.borrow().is_none() {
+                missing = sparse::grow_ranges(&missing, self.file.fetched().0.min(OPEN_GROWTH_MAX), block, self.file.len());
+            }
+            // Long ranges in parallel pieces where requests are not queued (see `server_runtime`):
+            // in Chromium, which keeps 6 connections to S3, they did not read faster.
+            if server_runtime() {
+                missing = sparse::split_long_ranges(&missing, block, SPLIT_RANGE_BYTES, MAX_PARALLEL);
+            }
             let parts = self.objects.as_ref().map(|o| o.missing()).unwrap_or_default();
             if missing.is_empty() && parts.is_empty() {
                 self.file.trim(self.cache_size);
