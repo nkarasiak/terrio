@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- terrio-js in Node.js, Deno and Bun splits a Zarr shard read into as many requests as it keeps
+  in flight (12), rather than into runs of up to 1 MiB: with the changes above, 128 bands of
+  TESSERA embeddings, read from S3 us-west-2 in Europe, took 2.29 s instead of 4.86 s. Browsers,
+  which queue requests on 6 connections to S3, keep the runs.
 - terrio-js keeps 12 remote requests in flight in a sliding window, the next starting as soon as
   one ends, rather than in batches of 12 that wait for their slowest request. When a request of a
   Zarr read fails, the bodies of the others are cancelled rather than read to their end.
