@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- terrio-js opens a remote Zarr v3 array without consolidated metadata in one round of requests
+  fewer: the array's `zarr.json` is asked for with the root's documents.
 - Zarr: Blosc's bit unshuffle transposes 8 x 8 bit blocks rather than moving a bit at a time;
   4.7 MB of int8 TESSERA embeddings took about 100 ms to unshuffle in WebAssembly before.
 - A VRT source with fractional `SrcRect` or `DstRect` offsets is read within its rectangles (#702).
