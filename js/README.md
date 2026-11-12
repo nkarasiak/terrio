@@ -181,7 +181,7 @@ import init, { openCog } from "terrio-js/cog";
 await init();
 const r = await openCog("https://example.com/dem.tif");
 r.width, r.height, r.count, r.dtype, r.nodata, r.transform, r.epsg;
-r.overviews();                                    // [[width, height], ...], largest first
+r.overviews;                                      // [[width, height], ...], largest first
 const [red, nir] = await r.read({ window: [0, 0, 512, 512], bands: [3, 4] }); // typed arrays
 const [preview] = await r.read({ overview: 2, bands: [1] }); // an overview, whole
 r.stats();                                        // { requests, bytes }
@@ -189,9 +189,10 @@ r.stats();                                        // { requests, bytes }
 
 Its options are those of `openUrl` for GeoTIFFs: `blockSize`, `cacheSize`, `fetch` and `headers`;
 a read fetches the bytes `openUrl` fetches for it. Without the CRS engine, `epsg` is the code of
-the GeoKeys' ProjectedCSTypeGeoKey or GeographicTypeGeoKey: a user-defined or vertical CRS is not
-read (`epsg` is then `undefined`, or the horizontal CRS's code). Reads return the samples as
-stored, without applying masks; `nodata` is the first band's.
+ProjectedCSTypeGeoKey, or of GeographicTypeGeoKey in a geographic model (GTModelTypeGeoKey 2):
+a user-defined or vertical CRS is not read (`epsg` is then `undefined`, or the horizontal CRS's
+code). Reads return the samples `openUrl` reads (CMYK as RGBA) without applying masks; `nodata` is
+the first band's.
 
 Measured from a local `wasm-release` build (wasm-opt `-Oz`; gzip 9, Brotli 11), not a recorded CI
 snapshot:

@@ -7,7 +7,7 @@
 //! import init, { openCog } from "terrio-js/cog";
 //! await init();
 //! const r = await openCog("https://example.com/dem.tif");
-//! r.width, r.height, r.count, r.dtype, r.nodata, r.transform, r.epsg, r.overviews();
+//! r.width, r.height, r.count, r.dtype, r.nodata, r.transform, r.epsg, r.overviews;
 //! const [band1] = await r.read({ window: [0, 0, 512, 512], bands: [1] }); // typed arrays
 //! ```
 
@@ -16,6 +16,9 @@ use std::rc::Rc;
 use terrio::{LazyRaster, Window, WindowOptions};
 use terrio_js_fetch::{Fetcher, Remote, get, typed_bands};
 use wasm_bindgen::prelude::*;
+
+/// The largest integer a JavaScript number holds exactly.
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn err(e: terrio::Error) -> JsError {
     JsError::new(&e.to_string())
@@ -54,9 +57,9 @@ pub async fn open_cog(url: String, options: JsValue) -> Result<CogRaster, JsErro
             return Ok(default);
         }
         v.as_f64()
-            .filter(|n| *n >= 0.0 && n.is_finite())
+            .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n <= MAX_SAFE_INTEGER)
             .map(|n| n as u64)
-            .ok_or_else(|| JsError::new(&format!("openCog: `{key}` must be a number of bytes")))
+            .ok_or_else(|| JsError::new(&format!("openCog: `{key}` must be a whole number of bytes")))
     };
     let block = bytes("blockSize", terrio::sparse::DEFAULT_BLOCK_SIZE)?;
     let cache_size = bytes("cacheSize", 256 << 20)?;
@@ -129,6 +132,7 @@ impl CogRaster {
     }
 
     /// The overview sizes `[[width, height], ...]`, largest first.
+    #[wasm_bindgen(getter)]
     pub fn overviews(&self) -> js_sys::Array {
         self.with(|r| {
             r.overviews().into_iter().map(|(w, h)| JsValue::from(js_sys::Array::of2(&(w as f64).into(), &(h as f64).into()))).collect()

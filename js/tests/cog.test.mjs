@@ -54,8 +54,8 @@ test("terrio-js/cog reads windows, bands and overviews as terrio-js does", async
     const full = await terrio.openUrl(server.url + "dem.tif");
     assert.deepEqual([r.width, r.height, r.count, r.dtype, r.epsg, r.nodata], [w, h, 2, "uint16", 32610, 0]);
     assert.deepEqual(Array.from(r.transform), [500000, 10, 0, 4100000, 0, -10]);
-    assert.ok(r.overviews().length > 0);
-    assert.deepEqual(r.overviews(), full.overviews);
+    assert.ok(r.overviews.length > 0);
+    assert.deepEqual(r.overviews, full.overviews);
     // Bands reordered, a window across tiles: the pixels terrio-js reads.
     const win = [500, 400, 100, 300];
     const [b2, b1] = await r.read({ window: win, bands: [2, 1] });
@@ -71,7 +71,7 @@ test("terrio-js/cog reads windows, bands and overviews as terrio-js does", async
     await r.read({ window: win, bands: [2, 1] });
     assert.equal(server.stats.requests, before);
     // An overview, whole, and a window of it.
-    const [ow, oh] = r.overviews()[0];
+    const [ow, oh] = r.overviews[0];
     const [o1] = await r.read({ overview: 0, bands: [1] });
     assert.deepEqual([...o1], [...(await full.readBand(1, undefined, 0))]);
     assert.equal(o1.length, ow * oh);
@@ -105,4 +105,7 @@ test("terrio-js/cog refuses unknown options and options of the wrong type", asyn
   await assert.rejects(cog.openCog("http://127.0.0.1:9/a.tif", { blocksize: 512 }), /unknown option `blocksize`/);
   await assert.rejects(cog.openCog("http://127.0.0.1:9/a.tif", { cacheSize: -1 }), /`cacheSize` must be/);
   await assert.rejects(cog.openCog("http://127.0.0.1:9/a.tif", { blockSize: "big" }), /`blockSize` must be/);
+  // Whole numbers, as openUrl takes them, rather than truncated.
+  await assert.rejects(cog.openCog("http://127.0.0.1:9/a.tif", { blockSize: 1000.5 }), /`blockSize` must be a whole number/);
+  await assert.rejects(cog.openCog("http://127.0.0.1:9/a.tif", { cacheSize: 1e30 }), /`cacheSize` must be a whole number/);
 });

@@ -1,8 +1,8 @@
 // Builds the npm package `terrio-js`: the full module (every format) at the package's root, the
 // lighter `terrio-js/core` module (without GeoParquet and Arrow, netCDF/HDF5, point clouds,
 // JPEG 2000, Zarr, AVIF and OSM) in `core/`, the Zarr-only `terrio-js/zarr` module (its own
-// crate, js/zarr) in `zarr/`, the GeoTIFF-only `terrio-js/cog` module (js/cog) in `cog/`, the threaded `terrio-js/threads` module (every
-// format, with `initThreadPool`) in `threads/`, the `terrio-js/memory64` module (every format,
+// crate, js/zarr) in `zarr/`, the GeoTIFF-only `terrio-js/cog` module (js/cog) in `cog/`, the
+// threaded `terrio-js/threads` module (every format, with `initThreadPool`) in `threads/`, the `terrio-js/memory64` module (every format,
 // with 64-bit memory, for datasets larger than 4 GB) in `memory64/`, and `terrio-js/load`, which
 // picks the module a page or process can run. All are optimized for size (the `wasm-release`
 // profile, and wasm-opt -Oz but for memory64, whose 64-bit tables the wasm-opt wasm-pack

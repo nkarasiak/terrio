@@ -826,6 +826,20 @@ impl LazyRaster {
     /// [`LazyRaster::read_geotiff_samples`] and asks for the CRS with
     /// [`LazyRaster::geotiff_epsg`] leaves the engine out (terrio-js/cog). A user-defined or
     /// vertical CRS is not read; [`LazyRaster::crs`] then has no CRS, or only the horizontal one.
+    ///
+    /// ```no_run
+    /// use terrio::sparse::{SparseFile, read_with};
+    /// use terrio::{LazyRaster, Window, WindowOptions};
+    ///
+    /// let bytes = std::fs::read("dem.tif")?; // the remote file, fetched by range in practice
+    /// let file = SparseFile::new(bytes.len() as u64);
+    /// let fetch = |offset: u64, len: u64| Ok(bytes[offset as usize..(offset + len) as usize].to_vec());
+    /// let mut dem = read_with(&file, 64, fetch, || LazyRaster::from_sparse_epsg_only(file.clone()))?.expect("a TIFF");
+    /// let epsg = dem.geotiff_epsg();
+    /// let options = WindowOptions { bands: vec![1], overview: None };
+    /// let pixels = read_with(&file, 64, fetch, || dem.read_geotiff_samples(Window::new(0, 0, 256, 256), &options))?;
+    /// # Ok::<(), terrio::Error>(())
+    /// ```
     pub fn from_sparse_epsg_only(file: crate::sparse::SparseFile) -> Result<Option<Self>> {
         declared_allowed(Self::from_sparse_using::<false>(file, TiffReadLimits::from_config))
     }
@@ -1110,8 +1124,11 @@ impl LazyRaster {
         }
     }
 
-    /// The EPSG code a GeoTIFF's GeoKeys (or its PAM sidecar) name, without resolving the CRS;
-    /// `None` for a user-defined CRS, a file without one, and other formats.
+    /// The EPSG code a GeoTIFF's CRS has, without resolving the CRS: after
+    /// [`LazyRaster::from_sparse_epsg_only`], the code of ProjectedCSTypeGeoKey, or of
+    /// GeographicTypeGeoKey in a geographic model; after other opens, the code the CRS was
+    /// identified with, which a compound CRS does not have. `None` without one, and for other
+    /// formats.
     pub fn geotiff_epsg(&self) -> Option<u32> {
         match &self.inner {
             Inner::Tiff(t) => t.tags.epsg,
@@ -1576,6 +1593,7 @@ impl LazyRaster {
     /// [`Error::InvalidArgument`] for a raster that is not a GeoTIFF, a window outside the image or
     /// overview, or a band that does not exist; the read's own errors otherwise.
     pub fn read_geotiff_samples(&mut self, window: Window, options: &WindowOptions) -> Result<RasterData> {
+        let _scope = self.enter_asset_read()?;
         let (lw, lh) = self.level_size(options.overview)?;
         window.check(lw, lh)?;
         let bands = read_bands(&options.bands, self.band_count())?;

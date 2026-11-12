@@ -331,6 +331,8 @@ jobs:
         run: |
           wasm-pack build js/cog --release --target nodejs --out-dir ../pkg-node/cog --out-name terrio --no-pack
           node --test js/tests/cog.test.mjs
+          # Without the CRS engine: none of its EPSG names (Pulkovo, in the full module's tables).
+          if grep -qaF Pulkovo js/pkg-node/cog/terrio_bg.wasm; then echo "::error::terrio-js/cog links the CRS engine"; exit 1; fi
 
   # The cargo features (see crates/terrio/Cargo.toml): each builds on its own, and so does the
   # core without them, natively and for WebAssembly.
