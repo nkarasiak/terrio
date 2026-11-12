@@ -519,7 +519,8 @@ impl Fetcher {
                 None => {
                     return Err(JsError::new(&format!(
                         "{}: the server's response has no Content-Range (cross-origin servers must expose it) and no Content-Length",
-                        self.url
+                        // Without the query, which may hold a signed URL's credentials.
+                        self.url.split(['?', '#']).next().unwrap_or(&self.url)
                     )));
                 }
             },

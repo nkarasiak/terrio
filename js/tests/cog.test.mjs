@@ -64,6 +64,7 @@ test("terrio-js/cog reads windows, bands and overviews as terrio-js does", async
     assert.deepEqual([...b1], [...src.readBand(1, win)]);
     // The requests terrio-js sends for the same read: the headers and the tiles under the window.
     await full.readBand(2, win);
+    await full.readBand(1, win);
     assert.deepEqual(r.stats(), full.stats());
     assert.ok(r.stats().bytes < statSync(join(dir, "dem.tif")).size);
     // Tiles read once are kept: the same window again sends no request.
