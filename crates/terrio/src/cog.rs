@@ -2981,36 +2981,35 @@ pub(crate) fn place<T: Copy + Send + Sync>(out: &mut [T], vals: &[T], g: &ChunkG
     if c1 <= c0 || r1 <= r0 {
         return;
     }
-    // The sample each output band takes from this chunk (the last one, if several name a band).
-    let mut sample_of = vec![None; out.len() / band_len];
-    for &(sample, band) in map {
-        if let Some(s) = sample_of.get_mut(band) {
-            *s = Some(sample);
+    // Copies the samples of `map` that go to `bands` (whose planes `planes` holds from its start),
+    // in map order, a row at a time so that a row of the chunk stays in cache for all of them. A
+    // chunk shorter than its rows (a truncated one) leaves the columns past its end as they are.
+    let copy = |bands: std::ops::Range<usize>, planes: &mut [T]| {
+        if !map.iter().any(|(_, band)| bands.contains(band)) {
+            return;
         }
-    }
-    // Fills the bands from `first_band` on (`planes` holds their planes): each sample to its
-    // band, a row at a time, so that a row of the chunk stays in cache for all of them. A chunk
-    // shorter than its rows (a truncated one) leaves the columns past its end as they are.
-    let copy = |first_band: usize, planes: &mut [T]| {
         for row in r0..r1 {
             let first = ((row - g.y0) * stride + c0 - g.x0) * g.spp;
             let dst = (row - w.y) * w.width + c0 - w.x;
-            for (plane, sample) in planes.chunks_mut(band_len).zip(&sample_of[first_band..]) {
-                let Some(sample) = sample else { continue };
+            for &(sample, band) in map.iter().filter(|(_, band)| bands.contains(band)) {
                 let src = vals.get(first + sample..).unwrap_or_default().iter().step_by(g.spp);
-                for (o, v) in plane[dst..][..c1 - c0].iter_mut().zip(src) {
+                for (o, v) in planes[(band - bands.start) * band_len + dst..][..c1 - c0].iter_mut().zip(src) {
                     *o = *v;
                 }
             }
         }
     };
     // Many samples (an embedding's 128 bands): groups of bands filled in parallel, about one a
-    // thread, while the read's decode threads go on with the next chunks.
-    if map.len() > 1 && map.len() * (r1 - r0) * (c1 - c0) >= PARALLEL_PLACE_SAMPLES {
-        let group = sample_of.len().div_ceil(crate::par::threads()).max(1);
-        crate::par::chunks_mut(out, group * band_len, |i, planes| copy(i * group, planes));
+    // thread, while the read's decode threads go on with the next chunks. Not on a thread of the
+    // pool: the read may hold a lock that other tasks of the pool take (a raster shared between
+    // them), and a pool thread waiting for its tasks runs others meanwhile.
+    if map.len() > 1 && map.len() * (r1 - r0) * (c1 - c0) >= PARALLEL_PLACE_SAMPLES && !crate::par::on_pool_thread() {
+        let planes = out.len() / band_len;
+        debug_assert!(map.iter().all(|&(_, band)| band < planes), "a sample mapped past the window's bands");
+        let group = planes.div_ceil(crate::par::threads()).max(1);
+        crate::par::chunks_mut_coarse(out, group * band_len, |i, planes| copy(i * group..(i + 1) * group, planes));
     } else {
-        copy(0, out);
+        copy(0..usize::MAX, out);
     }
 }
 
@@ -3918,7 +3917,9 @@ mod tests {
         }
         // A small chunk, placed on the calling thread; then a 256 x 256 chunk of 8 samples whose
         // larger maps fill the bands in parallel (into 100 bands, so a group holds several),
-        // including two samples sent to one band, where the last one wins.
+        // including two samples sent to one band. Each chunk is also truncated: the large one 5
+        // samples into its last pixel (its rows then 255 pixels apart), between the two samples
+        // sent to band 99. Each is placed from a thread of the pool too, which copies alone.
         let small: [&[(usize, usize)]; 3] = [&[(0, 0), (1, 1), (2, 2)], &[(2, 0), (0, 1)], &[(1, 1)]];
         let large: [&[(usize, usize)]; 3] = [
             &[(7, 0), (6, 1), (5, 2), (4, 3), (3, 4), (2, 5), (1, 6), (0, 7)],
@@ -3929,27 +3930,35 @@ mod tests {
             (
                 (16, 12, 3),
                 3,
+                50,
                 &small[..],
                 vec![Window::new(0, 0, 16, 12), Window::new(5, 3, 20, 20), Window::new(10, 7, 4, 3), Window::new(18, 0, 4, 4)],
             ),
             (
                 (256, 256, 8),
                 100,
+                256 * 8 - 5,
                 &large[..],
                 vec![Window::new(0, 0, 300, 300), Window::new(10, 5, 250, 250), Window::new(40, 30, 100, 250), Window::new(260, 0, 4, 4)],
             ),
         ];
-        for ((dw, dh, spp), bands, maps, windows) in cases {
+        for ((dw, dh, spp), bands, cut, maps, windows) in cases {
             let full: Vec<u16> = (0..dw * dh * spp).map(|i| i as u16).collect();
             let g = ChunkGeom { x0: 2, y0: 1, dw, dh, spp };
-            for vals in [&full[..], &full[..full.len() - 50 * spp - 1]] {
+            for vals in [&full[..], &full[..full.len() - cut]] {
                 for &map in maps {
                     for &w in &windows {
                         let mut want = vec![u16::MAX; w.width * w.height * bands];
-                        let mut got = want.clone();
                         by_pixel(&mut want, vals, &g, w, map);
+                        let mut got = vec![u16::MAX; want.len()];
                         place(&mut got, vals, &g, w, map);
                         assert!(got == want, "{w:?} {map:?} {} samples", vals.len());
+                        let on_pool = crate::par::install(|| {
+                            let mut got = vec![u16::MAX; want.len()];
+                            place(&mut got, vals, &g, w, map);
+                            got
+                        });
+                        assert!(on_pool == want, "on the pool: {w:?} {map:?} {} samples", vals.len());
                     }
                 }
             }

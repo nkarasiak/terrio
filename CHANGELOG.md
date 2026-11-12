@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-- A read of a pixel-interleaved GeoTIFF with many bands, such as 128-band embeddings, copies each
-  decoded chunk into its bands on several threads: the reading thread copied every chunk alone
-  while the decode threads waited. Chunks of fewer than 2^18 samples to copy (a 256 x 256 RGB tile)
-  are copied as before. Values are unchanged.
 - A `Raster` read lazily from a file, such as a GeoTIFF (`open_raster(path, lazy=True)`,
   `rio.open`, the xarray backend), can be read from several Python threads at once: `read`,
   `read_mask` and `numpy.asarray` raised `RuntimeError: Already borrowed` when a read overlapped
