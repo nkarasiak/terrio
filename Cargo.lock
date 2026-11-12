@@ -2606,6 +2606,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrio-js-cog"
+version = "0.8.0"
+dependencies = [
+ "js-sys",
+ "terrio",
+ "terrio-js-fetch",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "terrio-js-fetch"
 version = "0.8.0"
 dependencies = [
