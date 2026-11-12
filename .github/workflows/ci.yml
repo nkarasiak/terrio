@@ -326,6 +326,11 @@ jobs:
         run: |
           wasm-pack build js/zarr --release --target nodejs --out-dir ../pkg-node/zarr --out-name terrio --no-pack
           node --test js/tests/zarr.test.mjs
+      # The GeoTIFF-only module, `terrio-js/cog` (its own crate, js/cog).
+      - name: Build and test terrio-js/cog (Node.js)
+        run: |
+          wasm-pack build js/cog --release --target nodejs --out-dir ../pkg-node/cog --out-name terrio --no-pack
+          node --test js/tests/cog.test.mjs
 
   # The cargo features (see crates/terrio/Cargo.toml): each builds on its own, and so does the
   # core without them, natively and for WebAssembly.
