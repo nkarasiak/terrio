@@ -3013,8 +3013,9 @@ pub(crate) fn place<T: Copy + Send + Sync>(out: &mut [T], vals: &[T], g: &ChunkG
     }
 }
 
-/// The samples a chunk places from which [`place`] fills its bands in parallel: a 256 x 256 tile
-/// of 4 samples or more.
+/// The samples that [`place`] copies from a chunk (its samples to copy times the pixels the window
+/// takes from it) from which it fills the bands in parallel: a whole 256 x 256 tile, 4 of its
+/// samples or more.
 const PARALLEL_PLACE_SAMPLES: usize = 1 << 18;
 
 /// Whether the decoder's image is CMYK that GDAL reads through libtiff's RGBA interface, as RGBA
@@ -3902,7 +3903,7 @@ mod tests {
     /// the window, and a truncated chunk, whose missing samples leave the output as it was.
     #[test]
     fn interleaved_chunks_are_placed_sample_by_sample() {
-        fn by_pixel(out: &mut [u16], vals: &[u16], g: &ChunkGeom, w: Window, map: &[(usize, usize)]) {
+        fn by_pixel(out: &mut [u32], vals: &[u32], g: &ChunkGeom, w: Window, map: &[(usize, usize)]) {
             let stride = vals.len() / (g.dh * g.spp);
             for row in g.y0.max(w.y)..(g.y0 + g.dh).min(w.y + w.height) {
                 for col in g.x0.max(w.x)..(g.x0 + g.dw).min(w.x + w.width) {
@@ -3943,18 +3944,18 @@ mod tests {
             ),
         ];
         for ((dw, dh, spp), bands, cut, maps, windows) in cases {
-            let full: Vec<u16> = (0..dw * dh * spp).map(|i| i as u16).collect();
+            let full: Vec<u32> = (0..(dw * dh * spp) as u32).collect();
             let g = ChunkGeom { x0: 2, y0: 1, dw, dh, spp };
             for vals in [&full[..], &full[..full.len() - cut]] {
                 for &map in maps {
                     for &w in &windows {
-                        let mut want = vec![u16::MAX; w.width * w.height * bands];
+                        let mut want = vec![u32::MAX; w.width * w.height * bands];
                         by_pixel(&mut want, vals, &g, w, map);
-                        let mut got = vec![u16::MAX; want.len()];
+                        let mut got = vec![u32::MAX; want.len()];
                         place(&mut got, vals, &g, w, map);
                         assert!(got == want, "{w:?} {map:?} {} samples", vals.len());
                         let on_pool = crate::par::install(|| {
-                            let mut got = vec![u16::MAX; want.len()];
+                            let mut got = vec![u32::MAX; want.len()];
                             place(&mut got, vals, &g, w, map);
                             got
                         });
