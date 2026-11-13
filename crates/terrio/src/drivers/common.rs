@@ -241,11 +241,11 @@ impl RawWindow {
         let span = if window.width == 0 { 0 } else { ((window.width - 1) * stride + 1) * size };
         // Each row of each band read: its offset in the file and in the window, in file order.
         // A window with no samples (zero width, or no bands) reads nothing, whatever its height: its
-        // rows are not listed, so a huge height cannot size the list. Otherwise every row is at
-        // most `n` (the width is at least 1), so `height * bands` is within the checked sample count.
+        // rows are not listed, so a huge height cannot size the list. Otherwise `height * bands` is at
+        // most `n` (the width is at least 1), and the list is reserved fallibly, as the samples are.
         let mut rows = Vec::new();
         if n > 0 {
-            rows.reserve_exact(window.height * bands.len());
+            crate::dataset::fallible::reserve(&mut rows, window.height * bands.len(), "a raw raster's window rows").map_err(Error::Io)?;
             for (i, &b) in bands.iter().enumerate() {
                 let stored = self.stored_bands.as_ref().and_then(|s| s.get(b - 1).copied()).unwrap_or(b - 1);
                 for r in 0..window.height {
