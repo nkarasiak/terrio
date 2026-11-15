@@ -3075,10 +3075,6 @@ impl WarpContext<'_> {
     /// The sample point is validated against the source, not a requested crop. Near-edge
     /// approximations use the same exact retry in a full warp and in a narrow window.
     fn source_point(&self, point: Option<(f64, f64)>, dx: f64, dy: f64, bounds: (usize, usize, usize, usize)) -> Option<(f64, f64)> {
-        // TEST ONLY (bench comment validation): a deliberate per-pixel slowdown.
-        for i in 0..200u64 {
-            std::hint::black_box(i);
-        }
         let (mut x, mut y) = point?;
         let (sx, sy, w, h) = (bounds.0 as f64, bounds.1 as f64, bounds.2 as f64, bounds.3 as f64);
         for attempt in 0..2 {
