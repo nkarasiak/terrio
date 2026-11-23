@@ -10,7 +10,7 @@ pub(crate) fn document_error(format: &str, detail: impl std::fmt::Display) -> cr
 
 /// A rectangle `(min_x, min_y, max_x, max_y)` by its corners' extent: an inverted one (its corners
 /// swapped, such as `(10, 10, 0, 0)`) as the rectangle it spans, as `SpatialFilter` takes it.
-#[cfg_attr(not(any(feature = "parquet", feature = "flatgeobuf")), allow(dead_code))]
+#[cfg_attr(not(any(feature = "parquet", feature = "flatgeobuf", feature = "sqlite")), allow(dead_code))]
 pub(crate) fn corners_extent((x0, y0, x1, y1): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
     (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1))
 }
