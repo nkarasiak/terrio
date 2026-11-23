@@ -78,6 +78,8 @@ test("standard full/core/zarr/cog/geoparquet exports and loader remain available
   // Each module's glue imports its own snippets.
   assert.ok(pkg.files.includes("snippets/"));
   assert.ok(pkg.files.includes("core/snippets/"));
+  // terrio-js/geoparquet carries the GeoJSON glue of terrio-js (a snippet) too.
+  assert.ok(pkg.files.includes("geoparquet/snippets/"));
 });
 test("selective output refuses stale assets", () => {
   assert.throws(() => build(["--no-default-features"], (crate) => fs.mkdirSync(join(crate, "pkg"))), /must not exist/);

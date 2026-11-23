@@ -81,18 +81,21 @@ pub async fn open_geoparquet(url: String, options: JsValue) -> Result<GeoParquet
     let cache_size = bytes("cacheSize", 256 << 20)?;
     let path = url.split(['?', '#']).next().unwrap_or(&url);
     let name = path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("remote").to_string();
+    // From its end, or from its first block when the server refuses suffix ranges: the footer is
+    // then fetched by the reads below, as it is for `openUrl`.
     let file = fetcher.open_file_tail(block).await?;
-    let parquet = |f: &SparseFile| f.len() >= 4 && f.quiet().read_exact_at(f.len() - 4, 4).is_ok_and(|end| end == b"PAR1");
-    if !parquet(&file) {
-        return Err(JsError::new(&format!("'{name}' is not a Parquet file")));
-    }
     let remote = Remote::new(file, None, fetcher, cache_size);
+    let not_parquet = || terrio::Error::InvalidData(format!("'{name}' is not a Parquet file"));
     let opened = std::cell::RefCell::new(None);
     remote
         .run(
             || opened.borrow().is_none(),
             || {
-                let groups = terrio::vector::geoparquet_row_groups_sparse(&remote.file)?;
+                let file: &SparseFile = &remote.file;
+                if file.len() < 4 || file.read_exact_at(file.len() - 4, 4)? != b"PAR1" {
+                    return Err(not_parquet());
+                }
+                let groups = terrio::vector::geoparquet_row_groups_sparse(file)?;
                 // No row group: the footer alone, for the layer's CRS.
                 let layer = terrio::vector::read_geoparquet_sparse_epsg_only(&remote.file, &name, Some(&[]), None, None)?;
                 *opened.borrow_mut() = Some((groups, layer.crs_epsg()));

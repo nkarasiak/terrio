@@ -88,6 +88,17 @@ test("terrio-js/geoparquet reads features as terrio-js's openUrl does", async ()
     assert.equal(utm.epsg, 32610);
     const utmFull = await terrio.openUrl(server.url + "utm.parquet");
     assert.deepEqual(await utm.read({}), (await utmFull.read({})).toGeoJSON());
+    // A server that refuses suffix ranges: opened from the first block, the footer fetched after,
+    // as terrio-js does; small blocks take several rounds.
+    const noSuffix = (url, init) => (/^bytes=-/.test(init?.headers?.Range ?? "") ? Promise.resolve(new Response(null, { status: 416 })) : fetch(url, init));
+    for (const options of [{ fetch: noSuffix }, { blockSize: 4096 }, { fetch: noSuffix, blockSize: 4096 }]) {
+      const a = await gp.openGeoParquet(server.url + "cells.parquet", options);
+      const b = await terrio.openUrl(server.url + "cells.parquet", options);
+      assert.deepEqual(a.rowGroups, b.info().rowGroups);
+      assert.deepEqual(await a.read({ bbox: [0, 0, 10, 10] }), (await b.read({ bbox: [0, 0, 10, 10] })).toGeoJSON());
+      assert.deepEqual(a.stats(), b.stats(), JSON.stringify(Object.keys(options)));
+    }
+    await assert.rejects(gp.openGeoParquet(server.url + "not.parquet", { fetch: noSuffix }), /not a Parquet file/);
     // Bad reads are errors, not coerced.
     await assert.rejects(f.read({ rowGroups: [1] }), /no row group 1/);
     await assert.rejects(f.read({ rowGroups: [-1] }), /non-negative integers/);
