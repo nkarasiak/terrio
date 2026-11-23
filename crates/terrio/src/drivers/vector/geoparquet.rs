@@ -1781,6 +1781,7 @@ mod tests {
             (json!("urn:ogc:def:crs:OGC:1.3:CRS84"), Some(4326)),
             (json!("EPSG:4326+5773"), None),
             (json!("EPSG:0"), None),
+            (json!("EPSG:4326\0junk"), Some(4326)),
             (json!("EPSG:x"), None),
             (json!("+proj=longlat +datum=WGS84"), None),
             (json!({"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 32610}}), Some(32610)),

@@ -341,6 +341,8 @@ fn epsg_reference(s: &str) -> Option<u32> {
 /// URL forms). `None` for anything else (WKT, PROJ strings, compound or other authorities'
 /// references) and for code 0. The code is not checked against the EPSG registry.
 pub fn epsg_reference_code(s: &str) -> Option<u32> {
+    // The text up to its first NUL, as `SpatialRef::parse` reads a definition.
+    let s = until_nul(s);
     if is_wgs84_alias(&s.trim().to_ascii_uppercase()) {
         return Some(4326);
     }

@@ -277,7 +277,8 @@ fn geoparquet_epsg_without_crs_engine() {
         assert_eq!((lean.crs_epsg(), full.crs_epsg()), (Some(epsg), Some(epsg)), "{name}");
         let rows = |l: &terrio::Layer| l.features.iter().map(|f| (f.fid, f.geometry.clone(), f.attributes.clone())).collect::<Vec<_>>();
         assert_eq!((&lean.name, rows(&lean), lean_bytes), (&full.name, rows(&full), full_bytes), "{name}");
-        // The rectangle filter of terrio-js/geoparquet keeps what `ogr2ogr -spat` keeps.
+        // The rectangle filter of terrio-js/geoparquet keeps what terrio's `translate` spatial filter
+        // (`spat`, above) keeps.
         let filter = terrio::ops::vector_filter::SpatialFilter::rect(rect);
         let kept: Vec<u64> =
             lean.features.iter().filter(|f| f.geometry.as_ref().is_some_and(|g| filter.intersects(g))).map(|f| f.fid).collect();
