@@ -284,6 +284,24 @@ pub fn read_geoparquet_sparse(
     Ok(crate::dataset::fix_layer(layer, name, crate::formats::VectorDriver::Parquet))
 }
 
+#[cfg(feature = "parquet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
+/// As [`read_geoparquet_sparse`], without the CRS engine: the layer's CRS is only the EPSG code
+/// the file's `crs` names (PROJJSON with an EPSG `id`, `EPSG:<code>` or `OGC:CRS84`), EPSG:4326
+/// when it has none, and unknown for `null` or any other definition. Stored WKT is not
+/// re-identified as an EPSG code.
+pub fn read_geoparquet_sparse_epsg_only(
+    file: &crate::sparse::SparseFile,
+    name: &str,
+    row_groups: Option<&[usize]>,
+    bbox: Option<(f64, f64, f64, f64)>,
+    columns: Option<&[String]>,
+) -> crate::Result<Layer> {
+    crate::formats::check_driver_allowed("Parquet", name, crate::formats::Kind::Vector)?;
+    let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
+    crate::drivers::vector::geoparquet::read_sparse_epsg_only(file, stem, row_groups, bbox, columns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -202,6 +202,41 @@ snapshot:
 |---|---|---|---|
 | `terrio-js/cog` | 1.00 MB | 0.38 MB | 0.30 MB |
 
+## GeoParquet alone: `terrio-js/geoparquet`
+
+`terrio-js/geoparquet` is a fifth module, of its own API, that reads GeoParquet files over HTTP
+and nothing else: terrio's GeoParquet reader (row groups skipped by their statistics, only the
+column chunks of the fields asked for; Snappy, gzip, Brotli, LZ4 and ZSTD), the range requests of
+`openUrl` (opened from the file's end, 12 in flight, blocks kept between reads), features out as
+GeoJSON, and no CRS engine. It suits pages that only read GeoParquet, such as parcels or
+buildings within a map view.
+
+```js
+import init, { openGeoParquet } from "terrio-js/geoparquet";
+
+await init();
+const f = await openGeoParquet("https://example.com/parcels.parquet");
+f.rowGroups;                                      // [{ rows, first_row, bbox, bytes }, ...]
+f.epsg;                                           // 4326
+const fc = await f.read({ bbox: [2.2, 48.8, 2.5, 48.9], columns: ["id"] }); // GeoJSON
+const last = await f.read({ rowGroups: [f.rowGroups.length - 1] });
+f.stats();                                        // { requests, bytes }
+```
+
+Its options are those of `openUrl` for GeoParquet: `blockSize`, `cacheSize`, `fetch` and
+`headers` to open, `rowGroups`, `bbox` and `columns` to read; a read returns the features
+`openUrl(url).read(options)` then `toGeoJSON()` give, with the same requests. Without the CRS
+engine, `epsg` is the code the file's `crs` names (PROJJSON with an EPSG `id`, `EPSG:<code>` or
+`OGC:CRS84`), 4326 when it has none, and `undefined` for `null` or a CRS without an EPSG code;
+coordinates are in the file's CRS, not reprojected, and `bbox` is in that CRS too.
+
+Measured from a local `wasm-release` build (wasm-opt `-Oz`; gzip 9, Brotli 11), not a recorded CI
+snapshot:
+
+| Module | `.wasm` | gzip | Brotli |
+|---|---|---|---|
+| `terrio-js/geoparquet` | 3.27 MB | 1.17 MB | 0.91 MB |
+
 ## Threads: `terrio-js/load` and `terrio-js/threads`
 
 A separate module, `terrio-js/threads`, has every format and a thread pool of Web Workers (or
