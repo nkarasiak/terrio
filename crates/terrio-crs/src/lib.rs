@@ -341,13 +341,16 @@ fn epsg_reference(s: &str) -> Option<u32> {
 /// URL forms). `None` for anything else (WKT, PROJ strings, compound or other authorities'
 /// references) and for code 0. The code is not checked against the EPSG registry.
 pub fn epsg_reference_code(s: &str) -> Option<u32> {
-    let upper = s.trim().to_ascii_uppercase();
-    if matches!(upper.as_str(), "WGS84" | "WGS 84" | "OGC:CRS84" | "CRS84" | "URN:OGC:DEF:CRS:OGC:1.3:CRS84")
-        || upper.ends_with("/OGC/1.3/CRS84")
-    {
+    if is_wgs84_alias(&s.trim().to_ascii_uppercase()) {
         return Some(4326);
     }
     canonical_epsg_reference(s).filter(|&code| code != 0)
+}
+
+/// Whether an upper-cased definition names WGS 84's longitude/latitude CRS (EPSG:4326) by an
+/// alias: `WGS84`, `OGC:CRS84`, `CRS84`, or their URN and URL forms.
+fn is_wgs84_alias(upper: &str) -> bool {
+    matches!(upper, "WGS84" | "WGS 84" | "OGC:CRS84" | "CRS84" | "URN:OGC:DEF:CRS:OGC:1.3:CRS84") || upper.ends_with("/OGC/1.3/CRS84")
 }
 
 /// Canonical authority forms are independent of the optional projection engine.
@@ -711,9 +714,7 @@ impl SpatialRef {
             return Err(Error::Crs("empty definition".into()));
         }
         let upper = s.to_ascii_uppercase();
-        if matches!(upper.as_str(), "WGS84" | "WGS 84" | "OGC:CRS84" | "CRS84" | "URN:OGC:DEF:CRS:OGC:1.3:CRS84")
-            || upper.ends_with("/OGC/1.3/CRS84")
-        {
+        if is_wgs84_alias(&upper) {
             return Self::from_epsg(4326);
         }
         if s.starts_with('+') {

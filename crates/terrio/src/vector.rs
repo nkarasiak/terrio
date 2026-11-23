@@ -306,6 +306,8 @@ pub fn read_geoparquet_sparse_epsg_only(
 ) -> crate::Result<Layer> {
     crate::formats::check_driver_allowed("Parquet", name, crate::formats::Kind::Vector)?;
     let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
+    // Without `fix_layer`, which re-identifies stored WKT with the CRS engine: this read stores no
+    // WKT, and the layer is named after `stem` already.
     crate::drivers::vector::geoparquet::read_sparse_epsg_only(file, stem, row_groups, bbox, columns)
 }
 
