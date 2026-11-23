@@ -255,6 +255,12 @@ fn geoparquet_by_row_group() {
     let (layer, _) = sparse(&bytes, &file, || terrio::vector::read_geoparquet_sparse(&file, "s.parquet", None, Some(rect), None));
     let whole = terrio::memory::open_vector_bytes(bytes.clone(), "s.parquet", &Default::default()).unwrap();
     assert_eq!(spat(std::slice::from_ref(&layer), rect), spat(&whole.layers, rect));
+    // An inverted rectangle reads the rows of its corners' extent: before, rows were compared with
+    // the corners as given, and the features inside it were dropped.
+    let inverted = (rect.2, rect.3, rect.0, rect.1);
+    let (layer, _) = sparse(&bytes, &file, || terrio::vector::read_geoparquet_sparse(&file, "s.parquet", None, Some(inverted), None));
+    assert_eq!(spat(std::slice::from_ref(&layer), inverted), spat(&whole.layers, rect));
+    assert!(!layer.features.is_empty());
 }
 
 /// A read of some fields fetches the column chunks of those and of the geometry only.

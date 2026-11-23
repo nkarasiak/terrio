@@ -1933,6 +1933,9 @@ test("remote files read with range requests", async () => {
       assert.equal(last.toGeoJSON().features.length, groups.at(-1).rows);
       const inBox = (await pq.read({ bbox: [0, 0, 10, 10] })).toGeoJSON().features;
       assert.deepEqual(inBox.map((f) => f.properties.id).sort((a, b) => a - b), expected);
+      // An inverted bbox is taken by its corners' extent.
+      const inverted = (await pq.read({ bbox: [10, 10, 0, 0] })).toGeoJSON().features;
+      assert.deepEqual(inverted.map((f) => f.properties.id).sort((a, b) => a - b), expected);
       const ids = (await pq.read({ columns: ["ID"], bbox: [0, 0, 10, 10] })).toGeoJSON().features;
       assert.deepEqual(ids.map((f) => f.properties.id).sort((a, b) => a - b), expected);
       const shapes = (await pq.read({ columns: [] })).toGeoJSON().features;
