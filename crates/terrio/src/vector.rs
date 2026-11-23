@@ -287,9 +287,16 @@ pub fn read_geoparquet_sparse(
 #[cfg(feature = "parquet")]
 #[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
 /// As [`read_geoparquet_sparse`], without the CRS engine: the layer's CRS is only the EPSG code
-/// the file's `crs` names (PROJJSON with an EPSG `id`, `EPSG:<code>` or `OGC:CRS84`), EPSG:4326
-/// when it has none, and unknown for `null` or any other definition. Stored WKT is not
-/// re-identified as an EPSG code.
+/// the file's `crs` names, read from its text (a PROJJSON identifier, or a reference that
+/// [`terrio_crs::epsg_reference_code`] reads), EPSG:4326 when it has none, and unknown for `null`
+/// or a definition without a code. Codes are not checked against the EPSG registry, and stored
+/// WKT is not re-identified as an EPSG code.
+///
+/// # Errors
+///
+/// As [`read_geoparquet_sparse`]: the Parquet driver is not allowed, a row group does not exist,
+/// or the file is not GeoParquet that terrio reads; or bytes not yet fetched (see
+/// [`crate::sparse`]).
 pub fn read_geoparquet_sparse_epsg_only(
     file: &crate::sparse::SparseFile,
     name: &str,

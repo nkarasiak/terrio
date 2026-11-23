@@ -118,13 +118,13 @@ test("terrio-js/geoparquet reads features as terrio-js's openUrl does", async ()
   }
 });
 
-test("terrio-js/geoparquet reads a real file's row groups and bbox as GDAL does", { skip: !DATA && "TERRIO_TEST_DATA is not set" }, async (t) => {
+test("terrio-js/geoparquet reads a real file's row groups and bbox as terrio-js does", { skip: !DATA && "TERRIO_TEST_DATA is not set" }, async (t) => {
   if (!existsSync(join(DATA, "ne_places_rg.parquet"))) return t.skip("ne_places_rg.parquet is missing");
   const server = await serve(DATA);
   try {
     const f = await gp.openGeoParquet(server.url + "ne_places_rg.parquet");
     assert.deepEqual(f.rowGroups.map((g) => g.rows), [1000, 1000, 1000, 1000, 1000, 1000, 1000, 342]);
-    // GDAL's -spat result, as terrio-js's.
+    // The count node.test.mjs asserts for terrio-js (its "as GDAL reads them" test), and its features.
     const full = await terrio.openUrl(server.url + "ne_places_rg.parquet");
     const fc = await f.read({ bbox: [0, 40, 20, 55] });
     assert.equal(fc.features.length, 306);

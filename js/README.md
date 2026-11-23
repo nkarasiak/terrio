@@ -224,11 +224,18 @@ f.stats();                                        // { requests, bytes }
 ```
 
 Its options are those of `openUrl` for GeoParquet: `blockSize`, `cacheSize`, `fetch` and
-`headers` to open, `rowGroups`, `bbox` and `columns` to read; a read returns the features
-`openUrl(url).read(options)` then `toGeoJSON()` give, with the same requests. Without the CRS
-engine, `epsg` is the code the file's `crs` names (PROJJSON with an EPSG `id`, `EPSG:<code>` or
-`OGC:CRS84`), 4326 when it has none, and `undefined` for `null` or a CRS without an EPSG code;
-coordinates are in the file's CRS, not reprojected, and `bbox` is in that CRS too.
+`headers` to open (not `format`: the file is always read as GeoParquet), `rowGroups`, `bbox` and
+`columns` to read. A read returns the features `openUrl(url).read(options)` then `toGeoJSON()`
+give; for a URL whose file name ends in `.parquet`, with the same requests (`openUrl` opens other
+names from their start). The open reads the file's GeoParquet metadata, which `openUrl` reads at
+its first read, so a file whose metadata terrio refuses fails to open.
+
+Without the CRS engine, `epsg` is the EPSG code the file's `crs` names, read from its text: a
+PROJJSON identifier (or a bound CRS's source; 4326 for OGC:CRS84 or an unidentified WGS 84
+geographic CRS), or a reference such as `EPSG:32631`, its URN or URL forms or `OGC:CRS84`; 4326
+when the file has no `crs`. It is `undefined` for `null` and for definitions it cannot tie to a
+code (WKT, PROJ strings, compound references), and codes are not checked against the EPSG
+registry. Coordinates are in the file's CRS, not reprojected, and `bbox` is in that CRS too.
 
 Measured from a local `wasm-release` build (wasm-opt `-Oz`; gzip 9, Brotli 11), not a recorded CI
 snapshot:

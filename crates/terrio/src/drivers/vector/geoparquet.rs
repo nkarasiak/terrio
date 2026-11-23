@@ -961,19 +961,13 @@ fn coords(a: &dyn Array) -> Vec<Coord> {
 }
 
 /// The EPSG code a GeoParquet `crs` names, without the CRS engine: a PROJJSON definition's
-/// (see [`projjson_epsg`]), or an `EPSG:<code>` (or `OGC:CRS84`) string's. `None` for `null`, a
-/// definition without a code, or any other string (WKT, PROJ strings).
+/// (see [`projjson_epsg`]), or an EPSG reference string's (see
+/// [`terrio_crs::epsg_reference_code`]). `None` for `null`, a definition without a code, or any
+/// other string (WKT, PROJ strings, compound references).
 pub(crate) fn epsg_only_crs(crs: &Value) -> Option<u32> {
     match crs {
         Value::Null => None,
-        Value::String(s) => {
-            let s = s.trim();
-            if s.eq_ignore_ascii_case("OGC:CRS84") {
-                return Some(4326);
-            }
-            let (authority, code) = s.split_once(':')?;
-            authority.eq_ignore_ascii_case("EPSG").then(|| code.parse().ok()).flatten()
-        }
+        Value::String(s) => terrio_crs::epsg_reference_code(s),
         crs => projjson_epsg(crs),
     }
 }
@@ -1776,7 +1770,13 @@ mod tests {
             (json!(null), None),
             (json!("EPSG:32631"), Some(32631)),
             (json!(" epsg:2154 "), Some(2154)),
+            (json!("urn:ogc:def:crs:EPSG::32631"), Some(32631)),
+            (json!("http://www.opengis.net/def/crs/EPSG/0/32631"), Some(32631)),
+            (json!("32631"), Some(32631)),
             (json!("OGC:CRS84"), Some(4326)),
+            (json!("urn:ogc:def:crs:OGC:1.3:CRS84"), Some(4326)),
+            (json!("EPSG:4326+5773"), None),
+            (json!("EPSG:0"), None),
             (json!("EPSG:x"), None),
             (json!("+proj=longlat +datum=WGS84"), None),
             (json!({"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 32610}}), Some(32610)),

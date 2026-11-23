@@ -348,6 +348,8 @@ jobs:
         run: |
           wasm-pack build js/geoparquet --release --target nodejs --out-dir ../pkg-node/geoparquet --out-name terrio --no-pack
           node --test js/tests/geoparquet.test.mjs
+          # Its GeoJSON glue is a wasm-bindgen snippet, which the package must ship (js/build.mjs).
+          test -d js/pkg-node/geoparquet/snippets || { echo "::error::terrio-js/geoparquet has no snippets/"; exit 1; }
           # Without the CRS engine, as terrio-js/cog (the full module holds the name, checked above).
           if grep -qaF Pulkovo js/pkg-node/geoparquet/terrio_bg.wasm; then echo "::error::terrio-js/geoparquet links the CRS engine"; exit 1; fi
 

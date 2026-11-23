@@ -57,7 +57,8 @@ pub struct GeoParquetFile {
     inner: Rc<Inner>,
 }
 
-/// Opens the GeoParquet file at `url` from its end, where its footer is. Options: `blockSize`
+/// Opens the GeoParquet file at `url` from its end, where its footer is, and reads its
+/// GeoParquet metadata (refusing a file whose metadata terrio does not read). Options: `blockSize`
 /// (the bytes of each range request's blocks, 64 KiB by default), `cacheSize` (the bytes kept
 /// between reads, 256 MB by default), `fetch` and `headers` (for requests).
 #[wasm_bindgen(js_name = openGeoParquet)]
@@ -118,8 +119,8 @@ impl GeoParquetFile {
         js_sys::JSON::parse(&text).map_err(|_| JsError::new("rowGroups"))
     }
 
-    /// The EPSG code the file's `crs` names (EPSG:4326 when it has none), or `undefined` (`null`,
-    /// or a CRS without an EPSG code).
+    /// The EPSG code the file's `crs` names, read from its text (4326 when it has none), or
+    /// `undefined` (`null`, or a definition without a code): see the README.
     #[wasm_bindgen(getter)]
     pub fn epsg(&self) -> Option<u32> {
         self.inner.epsg
@@ -138,7 +139,8 @@ impl GeoParquetFile {
     /// bbox: [minX, minY, maxX, maxY], columns: ["id", "name"] }`, by default every row group and
     /// column. With `bbox`, row groups are skipped by their statistics and the features are those
     /// that intersect it, as `ogr2ogr -spat` keeps them; `columns` are matched without case.
-    /// A promise of the features `openUrl(url).read(options)` then `toGeoJSON()` give.
+    /// A promise of the features `openUrl(url).read(options)` then `toGeoJSON()` give, with the
+    /// same requests for a URL whose file name ends in `.parquet`.
     pub fn read(&self, options: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {

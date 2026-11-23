@@ -334,6 +334,22 @@ fn epsg_reference(s: &str) -> Option<u32> {
     code
 }
 
+/// The EPSG code a CRS reference names, read from its text alone, without the CRS registry or
+/// the projection engine: `EPSG:<code>` (or `EPSG::<code>`), a bare code, the OGC URN and URL
+/// forms (`urn:ogc:def:crs:EPSG::<code>`, `http://www.opengis.net/def/crs/EPSG/0/<code>`), and
+/// 4326 for WGS 84's longitude/latitude aliases (`OGC:CRS84`, `CRS84`, `WGS84`, their URN and
+/// URL forms). `None` for anything else (WKT, PROJ strings, compound or other authorities'
+/// references) and for code 0. The code is not checked against the EPSG registry.
+pub fn epsg_reference_code(s: &str) -> Option<u32> {
+    let upper = s.trim().to_ascii_uppercase();
+    if matches!(upper.as_str(), "WGS84" | "WGS 84" | "OGC:CRS84" | "CRS84" | "URN:OGC:DEF:CRS:OGC:1.3:CRS84")
+        || upper.ends_with("/OGC/1.3/CRS84")
+    {
+        return Some(4326);
+    }
+    canonical_epsg_reference(s).filter(|&code| code != 0)
+}
+
 /// Canonical authority forms are independent of the optional projection engine.
 fn canonical_epsg_reference(s: &str) -> Option<u32> {
     let digits = |s: &str| {
@@ -3823,6 +3839,7 @@ mod tests {
         ];
         for (input, canonical, legacy) in cases {
             assert_eq!(canonical_epsg_reference(input), canonical, "canonical: {input}");
+            assert_eq!(epsg_reference_code(input), canonical.filter(|&c| c != 0), "without the engine: {input}");
             #[cfg(feature = "wbprojection-fallback")]
             {
                 assert_eq!(wbp::epsg_from_srs_reference(input), legacy, "upstream: {input}");

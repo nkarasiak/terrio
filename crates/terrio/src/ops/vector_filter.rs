@@ -392,7 +392,9 @@ impl SpatialFilter {
         Ok(Self { ring, bbox })
     }
 
-    /// A filter on the rectangle `(min_x, min_y, max_x, max_y)`, in the layer's CRS.
+    /// A filter on the rectangle `(min_x, min_y, max_x, max_y)`, in the layer's CRS, as
+    /// [`Self::new`] makes it without a rectangle CRS, and without the CRS engine. An inverted
+    /// rectangle is taken by its corners' extent.
     pub fn rect(rect: (f64, f64, f64, f64)) -> Self {
         let (x0, y0, x1, y1) = rect;
         let ring = vec![(x0, y0), (x0, y1), (x1, y1), (x1, y0), (x0, y0)];

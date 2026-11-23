@@ -78,7 +78,7 @@ test("standard full/core/zarr/cog/geoparquet exports and loader remain available
   // Each module's glue imports its own snippets.
   assert.ok(pkg.files.includes("snippets/"));
   assert.ok(pkg.files.includes("core/snippets/"));
-  // terrio-js/geoparquet carries the GeoJSON glue of terrio-js (a snippet) too.
+  // build.mjs lists terrio-js/geoparquet's snippets when wasm-pack writes them (CI checks it does).
   assert.ok(pkg.files.includes("geoparquet/snippets/"));
 });
 test("selective output refuses stale assets", () => {
