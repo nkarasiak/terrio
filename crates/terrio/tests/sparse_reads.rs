@@ -198,6 +198,12 @@ fn flatgeobuf_by_bbox() {
     want.sort_unstable();
     assert_eq!(got, want);
     assert!(!got.is_empty());
+    // An inverted rectangle searches the index by its corners' extent: before, no node matched it.
+    let inverted = (rect.2, rect.3, rect.0, rect.1);
+    let ((_, layer), _) = sparse(&bytes, &file, || terrio::vector::read_flatgeobuf_sparse(&file, "s.fgb", Some(inverted)));
+    let mut got = spat(std::slice::from_ref(&layer), inverted);
+    got.sort_unstable();
+    assert_eq!(got, want);
     assert!(fetched < bytes.len() as u64 / 4, "{fetched} of {} bytes", bytes.len());
     // Every feature without a filter.
     let ((_, all), _) = sparse(&bytes, &file, || terrio::vector::read_flatgeobuf_sparse(&file, "s.fgb", None));

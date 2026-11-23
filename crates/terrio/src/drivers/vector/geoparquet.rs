@@ -347,9 +347,7 @@ impl ParquetStream {
         prefetch: Prefetch<'_>,
         columns: Option<&[String]>,
     ) -> Result<Self> {
-        // An inverted rectangle is taken by its corners' extent, here as well as by the filters
-        // callers apply after (`SpatialFilter`).
-        let bbox = bbox.map(|(x0, y0, x1, y1)| (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)));
+        let bbox = bbox.map(super::corners_extent);
         let err = |e: &dyn std::fmt::Display| Error::InvalidData(format!("Parquet: {e}"));
         let input = SharedInput(Arc::new(open()?));
         let builder = ParquetRecordBatchReaderBuilder::try_new(input.clone()).map_err(|e| err(&e))?;

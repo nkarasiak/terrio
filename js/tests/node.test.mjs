@@ -1903,6 +1903,9 @@ test("remote files read with range requests", async () => {
     assert.equal(expected.length, 9);
     const hits = (await fgb.read({ bbox: [0, 0, 10, 10] })).toGeoJSON().features;
     assert.deepEqual(hits.map((f) => f.properties.id).sort((a, b) => a - b), expected);
+    // An inverted bbox searches the index by its corners' extent.
+    const flipped = (await fgb.read({ bbox: [10, 10, 0, 0] })).toGeoJSON().features;
+    assert.deepEqual(flipped.map((f) => f.properties.id).sort((a, b) => a - b), expected);
     assert.ok(fgb.stats().bytes - before < fgb.size / 4);
 
     const pq = parquet && (await terrio.openUrl(server.url + "cells.parquet"));
