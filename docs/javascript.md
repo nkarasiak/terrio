@@ -216,8 +216,8 @@ Without the CRS engine, `epsg` is the EPSG code the file's `crs` names, read fro
 PROJJSON identifier (or a bound CRS's source; 4326 for OGC:CRS84 or an unidentified WGS 84
 geographic CRS), or a reference such as `EPSG:32631`, its URN or URL forms or `OGC:CRS84`; 4326
 when the file has no `crs`. It is `undefined` for `null` and for definitions it cannot tie to a
-code (WKT, PROJ strings, compound references), and codes are not checked against the EPSG
-registry. Coordinates are in the file's CRS, not reprojected, and `bbox` is in that CRS too.
+code (WKT, PROJ strings, compound references such as `EPSG:4326+5773`), and codes are not checked
+against the EPSG registry. Coordinates are in the file's CRS, not reprojected, and `bbox` is in that CRS too.
 
 Measured from a local `wasm-release` build (wasm-opt `-Oz`; gzip 9, Brotli 11), not a recorded CI
 snapshot:

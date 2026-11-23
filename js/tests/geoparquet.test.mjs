@@ -107,6 +107,10 @@ test("terrio-js/geoparquet reads features as terrio-js's openUrl does", async ()
     await assert.rejects(f.read({ rowGroups: 0 }), /`rowGroups` must be an array/);
     await assert.rejects(f.read({ bbox: [0, 0, 10] }), /`bbox` must be/);
     await assert.rejects(f.read({ bbox: [0, 0, 10, "x"] }), /`bbox` must be/);
+    await assert.rejects(f.read({ bbox: [0, 0, 10, NaN] }), /`bbox` must be/);
+    // Not infinite either: openUrl refuses them too (its options go through JSON).
+    await assert.rejects(f.read({ bbox: [-Infinity, -90, Infinity, 90] }), /`bbox` must be/);
+    await assert.rejects(full.read({ bbox: [-Infinity, -90, Infinity, 90] }));
     await assert.rejects(f.read({ columns: [1] }), /array of strings/);
     await assert.rejects(f.read({ bbx: [0, 0, 1, 1] }), /unknown option `bbx`/);
     await assert.rejects(f.read("x"), /must be an object/);

@@ -376,8 +376,8 @@ impl ParquetStream {
         prefetch: Prefetch<'_>,
         columns: Option<&[String]>,
     ) -> Result<Self> {
-        // An inverted rectangle is taken by its corners' extent, as GDAL's spatial filters take it,
-        // here as well as by the filters callers apply after (`SpatialFilter`).
+        // An inverted rectangle is taken by its corners' extent, here as well as by the filters
+        // callers apply after (`SpatialFilter`).
         let bbox = bbox.map(|(x0, y0, x1, y1)| (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)));
         let err = |e: &dyn std::fmt::Display| Error::InvalidData(format!("Parquet: {e}"));
         let input = SharedInput(Arc::new(open()?));
@@ -965,8 +965,9 @@ fn coords(a: &dyn Array) -> Vec<Coord> {
 
 /// The EPSG code a GeoParquet `crs` names, without the CRS engine: a PROJJSON definition's
 /// (see [`projjson_epsg`]), or an EPSG reference string's (see
-/// [`terrio_crs::epsg_reference_code`]). `None` for `null`, a definition without a code, or any
-/// other string (WKT, PROJ strings, compound references).
+/// [`terrio_crs::epsg_reference_code`]). `None` for `null`, a definition without a code (but an
+/// unidentified WGS 84 geographic CRS, 4326), any other string (WKT, PROJ strings, compound
+/// references), or code 0.
 pub(crate) fn epsg_only_crs(crs: &Value) -> Option<u32> {
     match crs {
         Value::Null => None,
