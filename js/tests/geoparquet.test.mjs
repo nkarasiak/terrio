@@ -79,6 +79,8 @@ test("terrio-js/geoparquet reads features as terrio-js's openUrl does", async ()
       assert.deepEqual(ours, theirs, JSON.stringify(options));
       assert.deepEqual(f.stats(), full.stats(), JSON.stringify(options));
     }
+    // An inverted bbox is taken by its corners' extent.
+    assert.deepEqual(await f.read({ bbox: [10, 10, 0, 0] }), await f.read({ bbox: [0, 0, 10, 10] }));
     // A bbox keeps the features that intersect it, not those of its row groups.
     const inBox = await f.read({ bbox: [0, 0, 10, 10] });
     assert.ok(inBox.features.length > 0 && inBox.features.length < 20);

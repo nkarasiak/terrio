@@ -376,6 +376,9 @@ impl ParquetStream {
         prefetch: Prefetch<'_>,
         columns: Option<&[String]>,
     ) -> Result<Self> {
+        // An inverted rectangle is taken by its corners' extent, as GDAL's spatial filters take it,
+        // here as well as by the filters callers apply after (`SpatialFilter`).
+        let bbox = bbox.map(|(x0, y0, x1, y1)| (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)));
         let err = |e: &dyn std::fmt::Display| Error::InvalidData(format!("Parquet: {e}"));
         let input = SharedInput(Arc::new(open()?));
         let builder = ParquetRecordBatchReaderBuilder::try_new(input.clone()).map_err(|e| err(&e))?;
@@ -968,7 +971,7 @@ pub(crate) fn epsg_only_crs(crs: &Value) -> Option<u32> {
     match crs {
         Value::Null => None,
         Value::String(s) => terrio_crs::epsg_reference_code(s),
-        crs => projjson_epsg(crs),
+        crs => projjson_epsg(crs).filter(|&code| code != 0),
     }
 }
 
@@ -978,7 +981,7 @@ fn projjson_epsg(v: &Value) -> Option<u32> {
     if let Some(id) = id
         && id["authority"].as_str().is_some_and(|a| a.eq_ignore_ascii_case("EPSG"))
     {
-        return id["code"].as_u64().map(|c| c as u32).or_else(|| id["code"].as_str()?.parse().ok());
+        return id["code"].as_u64().and_then(|c| u32::try_from(c).ok()).or_else(|| id["code"].as_str()?.parse().ok());
     }
     if id.is_some_and(|id| id["authority"] == "OGC" && id["code"] == "CRS84") {
         return Some(4326);
@@ -1781,6 +1784,9 @@ mod tests {
             (json!("+proj=longlat +datum=WGS84"), None),
             (json!({"type": "ProjectedCRS", "id": {"authority": "EPSG", "code": 32610}}), Some(32610)),
             (json!({"type": "ProjectedCRS", "name": "x"}), None),
+            (json!({"type": "GeographicCRS", "id": {"authority": "EPSG", "code": 0}}), None),
+            // 2^32 + 4326: out of range, not wrapped to 4326.
+            (json!({"type": "GeographicCRS", "id": {"authority": "EPSG", "code": 4_294_971_622_u64}}), None),
         ] {
             assert_eq!(epsg_only_crs(&crs), code, "{crs}");
         }

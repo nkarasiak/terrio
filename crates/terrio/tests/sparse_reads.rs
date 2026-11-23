@@ -282,6 +282,9 @@ fn geoparquet_epsg_without_crs_engine() {
         let kept: Vec<u64> =
             lean.features.iter().filter(|f| f.geometry.as_ref().is_some_and(|g| filter.intersects(g))).map(|f| f.fid).collect();
         assert_eq!(kept, spat(std::slice::from_ref(&full), rect), "{name}");
+        // An inverted rectangle reads the rows of its corners' extent, as GDAL's `-spat` takes it.
+        let (inverted, _) = read(true, None, Some((rect.2, rect.3, rect.0, rect.1)));
+        assert_eq!(rows(&inverted), rows(&lean), "{name}");
         // No row group: the footer's CRS, without features.
         let (empty, _) = read(true, Some(&[]), None);
         assert_eq!((empty.crs_epsg(), empty.features.len()), (Some(epsg), 0), "{name}");
