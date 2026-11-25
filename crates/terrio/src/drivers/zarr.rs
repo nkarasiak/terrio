@@ -709,7 +709,8 @@ fn zstd_decode(b: &[u8], most: usize) -> Result<Vec<u8>> {
 /// Decompresses a Blosc (version 1 format) buffer of at most `most` bytes: a header declaring more
 /// is refused before anything is allocated, and each block decompresses to its size or is an
 /// error, as in c-blosc. A block is decompressed into the output, or, shuffled, into a scratch
-/// block (reused) that is unshuffled into the output.
+/// block (reused) that is unshuffled into the output; LZ4 and stored streams are decoded in
+/// place, the other compressors through their decoder's buffer.
 fn blosc_decompress(src: &[u8], most: usize) -> Result<Vec<u8>> {
     if src.len() < 16 {
         return Err(bad("Blosc: truncated header"));
