@@ -1,6 +1,6 @@
 """Writes `crates/terrio/tests/data/ovr_rebuilds`: the external average overviews GDAL builds of
-masked rasters in several compressed levels, and of requested levels an `.ovr` already has
-(issue #1260), with what GDAL reads of them.
+masked rasters in several compressed levels, and of requested levels an `.ovr` already has (issue
+#1260), with what GDAL reads of them.
 
 Usage:
     python scripts/make_ovr_rebuild_fixtures.py
@@ -9,12 +9,12 @@ The sources are the issue's 67 x 45 Byte image: `plain.tif` without a mask, `mas
 internal per-dataset mask and `sidecar.tif` with the same mask in a `.msk` sidecar
 (`GDAL_TIFF_INTERNAL_MASK=NO`), which leaves out 7 x 7 blocks and scattered pixels. Each case
 copies a source and runs `gdaladdo -ro --config COMPRESS_OVERVIEW <compression> -r <method>` once
-per step (average unless a step names another method). Compressed, GDAL computes a single band's new levels block by block, each from the
-previous one, and weighs the previous level's pixels by its mask band, all valid in an `.ovr`,
-because the source has a mask. When a step requests levels the `.ovr` already has, GDAL builds
-the new ones first (uncompressed, band by band, it recomputes every level of the `.ovr` with
-them), then recomputes the requested existing ones band by band: from full resolution, or each
-from the previous one for averages of a raster without a mask.
+per step (average unless a step names another method). Compressed, GDAL computes a single band's
+new levels block by block, each from the previous one, and weighs the previous level's pixels by
+its mask band, all valid in an `.ovr`, because the source has a mask. When a step requests levels
+the `.ovr` already has, GDAL builds the new ones first (uncompressed, band by band, it recomputes
+every level of the `.ovr` with them), then recomputes the requested existing ones band by band:
+from full resolution, or each from the previous one for averages of a raster without a mask.
 
 `wide` is a 10300 x 520 Float32 raster in DEFLATE tiles of 256, with an internal mask, which
 `wide_masked_ovr_rebuilds_take_the_sidecar_order` writes the same way: so wide that band by band
@@ -23,10 +23,11 @@ GDAL computes its levels block by block (`GDALRegenerateOverviewsMultiBand`), in
 `2 4 8 16` uncompressed: the sidecar's `2 8`, then the new `4 16`, then `2 8` again.
 
 `expected.json` holds, for each case, its source, its steps and, for each level in the order GDAL
-lists them, its size, the mask GDAL reads of it (`GetMaskBand`, 1 valid and 0 not) and its data, row by
-row; for `wide`, each level's size and the FNV-1a 64-bit hash of its values (little-endian
+lists them, its size, the mask GDAL reads of it (`GetMaskBand`, 1 valid and 0 not) and its data,
+row by row; for `wide`, each level's size and the FNV-1a 64-bit hash of its values (little-endian
 Float32, row by row). Its weighted averages are not all exact: generate it with an x86-64 build of
-GDAL, which does not fuse their multiply-adds (arm64 builds do, 1 ulp apart), as terrio does not. Needs GDAL's Python bindings (3.13).
+GDAL, which does not fuse their multiply-adds (arm64 builds do, 1 ulp apart), as terrio does not.
+Needs GDAL's Python bindings (3.13).
 """
 
 from __future__ import annotations

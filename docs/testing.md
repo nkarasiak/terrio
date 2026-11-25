@@ -2657,10 +2657,11 @@ band. Rasters so wide that GDAL computes a band's levels block by block take
 them in the order the `.ovr` lists them, each from the previous one only when
 it is wider. `tests/data/ovr_rebuilds`
 (`scripts/make_ovr_rebuild_fixtures.py`) holds the issue's 67 by 45 Byte
-sources (no mask, internal mask, `.msk`) with six GDAL builds, and the digests
-of a 10,300 by 520 masked Float32 rebuild; `external_average_rebuilds_are_gdal_levels`
-and `wide_masked_ovr_rebuilds_take_the_sidecar_order` match their data and
-masks exactly, at every level, compared by size. A build that both adds levels
+sources (no mask, internal mask, `.msk`) with seven GDAL builds, and the
+digests of a 10,300 by 520 masked Float32 rebuild's data. At every level,
+compared by size, `external_average_rebuilds_are_gdal_levels` matches the
+builds' data and masks exactly and `wide_masked_ovr_rebuilds_take_the_sidecar_order`
+the rebuild's data digests. A build that both adds levels
 and requests existing ones reads the full-resolution image twice, as GDAL does.
 Known differences: an RGBA raster's requested existing levels, where GDAL
 cascades the alpha band on its own but not the colour bands, which terrio
