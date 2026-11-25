@@ -83,10 +83,15 @@ pub fn query_path(path: &str, statement: &str, options: &crate::VectorOpenOption
 fn filtered_parquet_layer(path: &str, statement: &str, options: &crate::VectorOpenOptions) -> Result<Option<Layer>> {
     let Ok(select) = Select::parse(statement) else { return Ok(None) };
     let Some(filter) = select.filter.as_ref().filter(|_| select.joins.is_empty()) else { return Ok(None) };
-    // ponytail: local only. Remotely, the predicate pass fetches each row group's filter columns
-    // in its own round trip (27 rounds against 8 for a whole read): batch them to extend it.
-    if crate::formats::VectorDriver::for_extension(path) != Some(crate::formats::VectorDriver::Parquet)
-        || !std::path::Path::new(path).is_file()
+    // A local file, or a remote one, whose predicate pass fetches the filter columns of its row
+    // groups together.
+    let location = crate::vfs::Location::parse(path);
+    #[cfg(remote)]
+    let remote = location.remote().is_some();
+    #[cfg(not(remote))]
+    let remote = false;
+    if crate::formats::VectorDriver::for_extension(&location.file_name()) != Some(crate::formats::VectorDriver::Parquet)
+        || !(remote || std::path::Path::new(path).is_file())
     {
         return Ok(None);
     }

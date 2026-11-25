@@ -78,9 +78,39 @@ impl ParquetStream {
                 Some(first)
             })
             .collect();
-        for (g, spatial) in self.windows.pending() {
-            if !predicate.may_match_ranges(|i| bounds(self.meta.row_group(g), &self.file_schema, &self.columns[i])) {
-                continue;
+        let candidates: Vec<_> = self
+            .windows
+            .pending()
+            .into_iter()
+            .filter(|(g, _)| predicate.may_match_ranges(|i| bounds(self.meta.row_group(*g), &self.file_schema, &self.columns[i])))
+            .collect();
+        // The predicate columns' chunks of each candidate group. With a prefetcher (a remote
+        // file), they are fetched together, at most its budget at a time, rather than one group
+        // per round trip.
+        let chunks = |g: usize| {
+            let rg = self.meta.row_group(g);
+            (0..rg.num_columns()).filter(|&i| mask.leaf_included(i)).map(|i| rg.column(i).byte_range()).collect::<Vec<_>>()
+        };
+        let budget = self.windows.prefetch_budget();
+        let mut fetched = 0;
+        for (k, (g, spatial)) in candidates.iter().cloned().enumerate() {
+            if let Some(budget) = budget
+                && k == fetched
+            {
+                let mut ranges = chunks(g);
+                let mut total: u64 = ranges.iter().map(|r| r.1).sum();
+                fetched += 1;
+                while let Some((next, _)) = candidates.get(fetched) {
+                    let more = chunks(*next);
+                    let size: u64 = more.iter().map(|r| r.1).sum();
+                    if total + size > budget {
+                        break;
+                    }
+                    total += size;
+                    ranges.extend(more);
+                    fetched += 1;
+                }
+                self.windows.prefetch(&mut ranges)?;
             }
             let mut keep = Vec::new();
             let mut row = 0;
@@ -202,6 +232,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file of 200 rows in row groups of 10: `id` (0..200) and an 8 KB `name` per row.
+    fn grouped_file() -> bytes::Bytes {
+        use arrow_array::{Int64Array, RecordBatch, StringArray};
+        use arrow_schema::Field;
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false), Field::new("name", DataType::Utf8, false)]));
+        let ids: Vec<i64> = (0..200).collect();
+        let names: Vec<String> = ids.iter().map(|i| format!("{i:0>8192}")).collect();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids)), Arc::new(StringArray::from(names))]).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder().set_max_row_group_row_count(Some(10)).build();
+        let mut data = Vec::new();
+        let mut writer = parquet::arrow::ArrowWriter::try_new(&mut data, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        data.into()
+    }
+
+    /// With a prefetcher (a remote file), the predicate pass announces the filter columns of the
+    /// row groups its statistics keep before reading them, many groups per call, within the
+    /// prefetcher's budget.
+    #[test]
+    fn predicate_columns_are_prefetched_together_within_the_budget() {
+        use std::sync::{Arc, Mutex};
+        let data = grouped_file();
+        let meta = parquet::arrow::arrow_reader::ArrowReaderMetadata::load(&data, Default::default()).unwrap().metadata().clone();
+        let id_chunk = |g: usize| meta.row_group(g).column(0).byte_range();
+        // `id < 35 OR id >= 180`: groups 0..4 and 18..20.
+        let kept: Vec<usize> = (0..4).chain(18..20).collect();
+        for (budget, calls) in [(u64::MAX, 1), (id_chunk(0).1 * 2, 3)] {
+            let seen: Arc<Mutex<Vec<Vec<(u64, u64)>>>> = Arc::default();
+            let record = seen.clone();
+            let mut stream = ParquetStream::open(|| Ok(data.clone()), "t", None, None, 64, None, None)
+                .unwrap()
+                .with_prefetcher((Box::new(move |r: &[(u64, u64)]| Ok(record.lock().unwrap().push(r.to_vec()))), budget));
+            stream.filter_attributes(&Expression::parse("id < 35 OR id >= 180").unwrap()).unwrap();
+            let seen = std::mem::take(&mut *seen.lock().unwrap());
+            assert_eq!(seen.len(), calls, "budget {budget}");
+            assert_eq!(seen.concat(), kept.iter().map(|&g| id_chunk(g)).collect::<Vec<_>>(), "budget {budget}");
+            let fids: Vec<u64> = stream.read_all().unwrap().features.iter().map(|f| f.fid).collect();
+            assert_eq!(fids, (0..35).chain(180..200).collect::<Vec<_>>());
+        }
+    }
+
+    /// A query on a remote GeoParquet file filters its rows in the reader, as on a local one.
+    #[cfg(remote)]
+    #[test]
+    fn sql_on_a_url_matches_the_query_on_a_local_path() {
+        let data = grouped_file();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.parquet");
+        std::fs::write(&path, &data).unwrap();
+        let (base, requests) = crate::http::test_server(data.to_vec());
+        let statement = "SELECT id FROM t WHERE id < 35 OR id IN (150, 199)";
+        let local = crate::ops::sql::query_path(path.to_str().unwrap(), statement, &Default::default()).unwrap();
+        let remote = crate::ops::sql::query_path(&format!("{base}/t.parquet"), statement, &Default::default()).unwrap();
+        let rows = |l: &Layer| l.features.iter().map(|f| (f.fid, f.attributes.clone())).collect::<Vec<_>>();
+        assert_eq!(rows(&remote), rows(&local));
+        assert_eq!(remote.features.len(), 37);
+        // Only the 5 row groups that match are read, not the 20 of the file: a whole read would
+        // fetch the file's 1.6 MB of names.
+        let fetched: usize = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter_map(|r| {
+                let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
+                Some(b.parse::<usize>().ok()? + 1 - a.parse::<usize>().ok()?)
+            })
+            .sum();
+        assert!(fetched < data.len() / 2, "{fetched} of {} bytes", data.len());
     }
 
     #[test]
