@@ -98,15 +98,15 @@ impl ParquetStream {
                 && k == announced
             {
                 let mut ranges = chunks(g);
-                let mut total: u64 = ranges.iter().map(|r| r.1).sum();
+                let mut total = ranges.iter().fold(0u64, |t, r| t.saturating_add(r.1));
                 announced += 1;
                 while let Some((next, _)) = candidates.get(announced) {
                     let more = chunks(*next);
-                    let size: u64 = more.iter().map(|r| r.1).sum();
-                    if total + size > budget {
+                    let size = more.iter().fold(0u64, |t, r| t.saturating_add(r.1));
+                    if total.saturating_add(size) > budget {
                         break;
                     }
-                    total += size;
+                    total = total.saturating_add(size);
                     ranges.extend(more);
                     announced += 1;
                 }
@@ -318,16 +318,20 @@ mod tests {
         let rows = |l: &Layer| l.features.iter().map(|f| (f.fid, f.attributes.clone())).collect::<Vec<_>>();
         assert_eq!(rows(&remote), rows(&local));
         assert_eq!(remote.features.len(), 37);
-        // Only the 6 row groups whose statistics may match are read, not the 20 of the file: a whole read would
-        // fetch the file's 1.6 MB of names.
+        // Only the 6 row groups whose statistics may match are read, not the 20 of the file: a
+        // whole read would fetch the file's 1.6 MB of names. A request without a range (or with
+        // another form) counts as the whole file.
         let fetched: usize = requests
             .lock()
             .unwrap()
             .iter()
-            .flatten()
-            .filter_map(|r| {
-                let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
-                Some(b.parse::<usize>().ok()? + 1 - a.parse::<usize>().ok()?)
+            .map(|r| {
+                r.as_deref()
+                    .and_then(|r| {
+                        let (a, b) = r.strip_prefix("bytes=")?.split_once('-')?;
+                        Some(b.parse::<usize>().ok()?.min(data.len() - 1) + 1 - a.parse::<usize>().ok()?)
+                    })
+                    .unwrap_or(data.len())
             })
             .sum();
         assert!(fetched < data.len() / 2, "{fetched} of {} bytes", data.len());
