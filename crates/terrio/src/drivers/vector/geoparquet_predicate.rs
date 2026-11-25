@@ -85,8 +85,8 @@ impl ParquetStream {
             .filter(|(g, _)| predicate.may_match_ranges(|i| bounds(self.meta.row_group(*g), &self.file_schema, &self.columns[i])))
             .collect();
         // The predicate columns' chunks of each candidate group. With a prefetcher (a remote
-        // file), they are fetched together, at most its budget at a time, rather than one group
-        // per round trip.
+        // file), they are fetched together, at most its budget at a time (a group alone when it
+        // is larger), rather than one group per round trip.
         let chunks = |g: usize| {
             let rg = self.meta.row_group(g);
             (0..rg.num_columns()).filter(|&i| mask.leaf_included(i)).map(|i| rg.column(i).byte_range()).collect::<Vec<_>>()
