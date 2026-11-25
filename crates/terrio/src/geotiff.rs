@@ -2189,6 +2189,51 @@ mod tests {
         assert_eq!(names, ["Gray", "Undefined", "Undefined"]);
     }
 
+    /// A COG of three JPEG Byte bands, red, green and blue, is YCbCr unless PHOTOMETRIC says
+    /// otherwise, as GDAL 3.13.3's COG driver writes it: its bands read as red, green and blue,
+    /// close to the source, from a smaller file than RGB's. A GeoTIFF copy stays RGB, and one JPEG
+    /// band gray.
+    #[test]
+    fn a_cog_of_three_jpeg_bands_is_ycbcr_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let raster = |bands: usize| {
+            let cfg = wbraster::RasterConfig { cols: 64, rows: 64, bands, data_type: wbraster::DataType::U8, ..Default::default() };
+            let data = (0..bands * 64 * 64).map(|i| ((i % 64) * 2 + (i / 64 % 64) + i / 4096 * 40) as u8).collect();
+            wbraster::Raster::from_data_native(cfg, wbraster::raster::RasterData::U8(data)).unwrap()
+        };
+        let write = |bands: usize, driver: crate::formats::RasterDriver, photometric: Option<&str>| {
+            let r = raster(bands);
+            let out = dir.path().join(format!("{bands}-{driver:?}-{photometric:?}.tif"));
+            let mut creation_options = vec![("COMPRESS".to_string(), "JPEG".to_string())];
+            creation_options.extend(photometric.map(|p| ("PHOTOMETRIC".to_string(), p.to_string())));
+            let options = crate::RasterWriteOptions { driver: Some(driver), creation_options, ..Default::default() };
+            // Three bands are red, green and blue, which a GeoTIFF copy writes PHOTOMETRIC=RGB and
+            // GDAL's COG driver YCbCr.
+            let mut ds = crate::RasterDataset::new(r.clone(), false);
+            if bands == 3 {
+                ds.band_metadata =
+                    ["Red", "Green", "Blue"].map(|c| crate::BandMetadata { color_interp: Some(c.into()), ..Default::default() }).to_vec();
+            }
+            crate::write_raster_dataset(&ds, out.to_str().unwrap(), &options).unwrap();
+            let mut dec = tiff::decoder::Decoder::new(std::fs::File::open(&out).unwrap()).unwrap();
+            let tag = dec.find_tag_unsigned::<u16>(tiff::tags::Tag::PhotometricInterpretation).unwrap();
+            let read = read_geotiff(&out).unwrap();
+            let error = read.raster.data.to_f64_vec().iter().zip(r.data.to_f64_vec()).map(|(a, b)| (a - b).abs()).sum::<f64>()
+                / (bands * 64 * 64) as f64;
+            let names: Vec<String> = (1..=bands).map(|b| read.band_color_interp(b).to_string()).collect();
+            (tag, names, error, std::fs::metadata(&out).unwrap().len())
+        };
+        use crate::formats::RasterDriver::{Cog, GTiff};
+        let (tag, names, error, ycbcr_size) = write(3, Cog, None);
+        assert_eq!((tag, names), (Some(6), vec!["Red".to_string(), "Green".into(), "Blue".into()]));
+        assert!(error < 4.0, "mean error {error}");
+        let (tag, _, _, rgb_size) = write(3, Cog, Some("RGB"));
+        assert_eq!(tag, Some(2));
+        assert!(ycbcr_size < rgb_size, "YCbCr {ycbcr_size} bytes, RGB {rgb_size}");
+        assert_eq!(write(3, GTiff, None).0, Some(2));
+        assert_eq!(write(1, Cog, None).0, Some(1));
+    }
+
     /// Three Byte bands of Undefined colour interpretation written with PHOTOMETRIC=RGB or YCBCR
     /// read as red, green and blue, as GDAL 3.13.3 writes them: the photometric given overrides the
     /// source's colour interpretations, which are left out of GDAL_METADATA.

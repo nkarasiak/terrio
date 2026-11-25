@@ -247,6 +247,12 @@ whatever the compression. A COG also takes GDAL's COG option `LEVEL`, ahead of e
 level of `DEFLATE` and `LERC_DEFLATE`, the Zstandard level of `ZSTD` and `LERC_ZSTD`; other
 compressions ignore it, as GDAL does.
 
+A COG of three Byte bands compressed with JPEG is written in YCbCr, subsampled as with
+`PHOTOMETRIC=YCBCR`, as GDAL's COG driver writes it; `PHOTOMETRIC=RGB` (an option GDAL's COG driver
+does not have) keeps it RGB. A GeoTIFF's JPEG stays RGB unless `PHOTOMETRIC=YCBCR` is given. With
+`PHOTOMETRIC=RGB` given, or in YCbCr, the first three bands read as red, green and blue whatever
+the source's colour interpretations, as GDAL writes them.
+
 `SPARSE_OK=YES` leaves out of a GeoTIFF the blocks of its full-resolution image whose samples are
 all nodata, or 0 without nodata, in every band the block holds: every band of the file, or, with
 `INTERLEAVE=BAND`, only the block's own band, so that each band's blocks are left out on their own.

@@ -55,7 +55,8 @@ pub(crate) struct CodecParams {
     pub max_z_error: f64,
     /// JPEG: the quality, 1 to 100.
     pub jpeg_quality: u8,
-    /// JPEG: three bands in YCbCr (`PHOTOMETRIC=YCBCR`), subsampled.
+    /// JPEG: three bands in YCbCr, subsampled; [`Level::sparse_image`] sets it from the layout's
+    /// photometric.
     pub jpeg_ycbcr: bool,
     pub webp_quality: u8,
     pub webp_lossless: bool,
@@ -940,7 +941,6 @@ impl TiffOptions {
         if o.compression == Compression::Jxl && co("JXL_LOSSLESS").is_some_and(|v| !yes(v)) {
             return Err(Error::Unsupported("lossy JPEG XL is not written: JXL_LOSSLESS=YES only".into()));
         }
-        o.codec.jpeg_ycbcr = o.photometric == Some(6);
         o.alpha = co("ALPHA").is_some_and(|v| yes(v) || v.eq_ignore_ascii_case("NON-PREMULTIPLIED"));
         if !o.color_table.is_empty() && o.photometric.is_none() {
             o.photometric = Some(3);
@@ -1187,6 +1187,8 @@ fn plan(raster: &Raster, opts: &TiffOptions) -> Result<Plan> {
         Some(6) if jpeg && samples == 3 => 6,
         Some(6) => return Err(Error::Unsupported("PHOTOMETRIC=YCBCR needs JPEG compression of 3 bands".into())),
         Some(p) => p,
+        // GDAL 3.13.3's COG driver writes three JPEG bands as YCbCr (`GDALCOGCreator::Create`).
+        None if opts.cog && jpeg && samples == 3 => 6,
         None if (samples == 3 || (samples == 4 && opts.compression == Compression::WebP)) && raster.data_type == DataType::U8 => 2,
         None => 1,
     };
@@ -1823,6 +1825,7 @@ impl<'a> Level<'a> {
         layout: &Layout,
         empty: Option<f64>,
     ) -> Result<Image> {
+        let codec = &CodecParams { jpeg_ycbcr: layout.photometric == 6, ..*codec };
         let parts = layout.parts;
         // The size of a sample's part, and the TIFF samples per pixel.
         let size = t.size_bytes();
@@ -6314,16 +6317,7 @@ following conditions:
     #[test]
     fn color_interpretations_survive_lazy_reads_and_band_selection() {
         let rgb = layouts_raster(3, DataType::U8);
-        let bytes = encode(
-            &rgb,
-            &TiffOptions {
-                compression: Compression::Jpeg,
-                photometric: Some(6),
-                codec: CodecParams { jpeg_ycbcr: true, ..Default::default() },
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let bytes = encode(&rgb, &TiffOptions { compression: Compression::Jpeg, photometric: Some(6), ..Default::default() }).unwrap();
         let jpeg = crate::LazyRaster::from_tiff_bytes(bytes).unwrap().unwrap().header();
         assert_eq!((1..=3).map(|b| jpeg.band_color_interp(b)).collect::<Vec<_>>(), ["Red", "Green", "Blue"]);
 

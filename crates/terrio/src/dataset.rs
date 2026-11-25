@@ -1954,7 +1954,11 @@ pub(crate) fn color_options(ds: &RasterDataset, path: &str, options: &RasterWrit
     let ci = |b: usize| ds.band_metadata.get(b).and_then(|m| m.color_interp.as_deref()).map(str::to_ascii_lowercase);
     let bands = ds.raster.bands;
     let photometric = given("PHOTOMETRIC");
-    let rgb = photometric.is_none() && bands >= 3 && (0..3).map(ci).eq(["red", "green", "blue"].map(|c| Some(c.to_string())));
+    // GDAL 3.13.3's COG driver gives three JPEG bands PHOTOMETRIC=YCBCR itself, which the writer's
+    // default is (`GDALCOGCreator::Create`).
+    let compress = options.compression.as_deref().map(str::to_ascii_uppercase).or_else(|| given("COMPRESS"));
+    let cog_ycbcr = driver == Some(RasterDriver::Cog) && bands == 3 && compress.as_deref() == Some("JPEG");
+    let rgb = photometric.is_none() && !cog_ycbcr && bands >= 3 && (0..3).map(ci).eq(["red", "green", "blue"].map(|c| Some(c.to_string())));
     // The colour samples, as the writer resolves the photometric (3 Byte bands are RGB).
     let color_samples = match photometric.as_deref() {
         Some("RGB" | "YCBCR") => 3,
