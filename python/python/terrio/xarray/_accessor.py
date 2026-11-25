@@ -38,7 +38,7 @@ from terrio.rio import open as rio_open
 from terrio.rio import warp, windows
 from terrio.rio.crs import CRS
 from terrio.rio.enums import Resampling
-from terrio.rio.errors import WindowError
+from terrio.rio.errors import CRSError, WindowError
 from terrio.rio.io import MemoryFile, driver_from_extension
 from terrio.xarray import _ops, _zonal
 from terrio.xarray._crs import crs_from_cf, crs_from_user_input, crs_to_cf
@@ -114,14 +114,15 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
     Raises:
         CRSError: The first unreadable source's error, when no source can be read.
     """
-    error: Exception | None = None
+    # The unreadable values, not their errors: a kept error's traceback would hold this frame
+    # and `obj` in a reference cycle.
+    unreadable: list[Any] = []
 
     def parse(value: Any) -> CRS | None:
-        nonlocal error
         try:
             return crs_from_user_input(value)
-        except Exception as e:  # noqa: BLE001 - try the next source, raise if none reads
-            error = error or e
+        except Exception:  # noqa: BLE001 - try the next source, raise if none reads
+            unreadable.append(value)
             return None
 
     try:
@@ -143,8 +144,8 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
                 return crs
     if "crs" in obj.attrs and (crs := parse(obj.attrs["crs"])) is not None:
         return crs
-    if error is not None:
-        raise error
+    if unreadable:
+        return crs_from_user_input(unreadable[0])  # raises the first unreadable source's error
     return None
 
 
@@ -2082,18 +2083,18 @@ class TerrioDataset(XRasterBase):
         """
         if self._crs is not None:
             return None if self._crs is False else self._crs
-        error: Exception | None = None
+        unreadable = False
         try:
             crs = super().crs
-        except Exception as e:  # noqa: BLE001 - the variables may still give one
-            crs, error = None, e
+        except CRSError:  # the variables may still give one
+            crs, unreadable = None, True
         if crs is not None:
             return crs
         crs_list = [self._obj[v].terrio.crs for v in self.vars]
         crs_list = [c for c in crs_list if c is not None]
         if not crs_list:
-            if error is not None:
-                raise error
+            if unreadable:
+                return super().crs  # raises the Dataset's error again
             self._crs = False
             return None
         first: CRS = crs_list[0]

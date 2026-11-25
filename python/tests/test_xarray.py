@@ -1217,3 +1217,32 @@ def test_unreadable_dataset_crs_falls_back_to_its_variables_or_raises():
         _ = xr.Dataset({"v": da}, attrs=proj).terrio.crs
     with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
         _ = _with_crs_in("spatial_ref", "GEOGCS[x]").to_dataset(name="v").terrio.crs
+
+
+@pytest.mark.parametrize("kind", ["DataArray", "Dataset"])
+def test_unreadable_crs_read_leaves_no_reference_cycle(kind):
+    """An unreadable source's error does not keep the object alive without the cyclic
+    garbage collector, whether a later source reads or the error is raised."""
+    from terrio.rio.errors import CRSError
+
+    gc.disable()
+    try:
+        for fallback in ("EPSG:4326", None):
+            da = _with_crs_in("spatial_ref", "GEOGCS[x]")
+            if kind == "Dataset":
+                obj = xr.Dataset({"v": da.assign_attrs(crs=fallback) if fallback else da})
+                obj.attrs.update(
+                    {"zarr_conventions": [{"name": "proj:"}], "proj:code": "EPSG:999999"}
+                )
+            else:
+                obj = da.assign_attrs(crs=fallback) if fallback else da
+            ref = weakref.ref(obj.variable.data if kind == "DataArray" else obj["v"].variable.data)
+            if fallback:
+                assert obj.terrio.crs == fallback
+            else:
+                with pytest.raises(CRSError):
+                    _ = obj.terrio.crs
+            del obj, da
+            assert ref() is None, fallback
+    finally:
+        gc.enable()
