@@ -484,7 +484,7 @@ impl Pool {
         self.0.install(f)
     }
 
-    /// Applies placement and retains its outside-work guard until the call returns or unwinds.
+    /// Applies placement; a call on the pool keeps its outside guard until it returns or unwinds.
     fn run<R: Send>(&self, f: impl FnOnce(bool) -> R + Send) -> R {
         match self.enter() {
             Enter::Serial => f(false),
@@ -1031,15 +1031,15 @@ mod tests {
         // Work rayon would not split stays on the calling thread, as on rayon's global pool.
         let caller = std::thread::current().id();
         assert_eq!(map_range(1, |_| std::thread::current().id()), vec![caller]);
-        // Bigger work runs on the pool when this is the lone outside thread at work — or serially
-        // on the caller when another test's outside work is in flight (the counter is
-        // process-wide, so a strict pool-use assertion is not deterministic in a shared test
-        // process) — but never on rayon's global pool.
+        // Bigger work runs on the pool when no other outside call holds it — or serially on the
+        // caller when another test's outside call does (the flag is process-wide, so a strict
+        // pool-use assertion is not deterministic in a shared test process) — but never on
+        // rayon's global pool.
         let ran = map_range(64, |_| (std::thread::current().id(), std::thread::current().name().map(str::to_string)));
         assert!(ran.iter().all(|(id, name)| *id == caller || name.as_deref().is_some_and(|n| n.starts_with("terrio-par-"))), "{ran:?}");
     }
 
-    /// Pool placement is checked alone, so unrelated modules cannot change the counter.
+    /// Pool placement is checked alone, so that no unrelated module's call holds the pool.
     #[test]
     #[cfg(all(threads, not(target_family = "wasm")))]
     fn lone_outside_work_uses_terrios_pool() {
@@ -1079,44 +1079,37 @@ mod tests {
         });
     }
 
-    /// Serializes these counter-specific tests. Other modules can still have outside work
-    /// in flight; strict lone-caller assertions therefore run in a separate test process.
-    #[cfg(all(threads, not(target_family = "wasm")))]
-    fn counter_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// While another thread outside the pool has parallel work in flight on the pool, an outside
-    /// call enters serially, so overlapping outside callers do not queue on the pool together.
+    /// While another thread outside the pool has a call on the pool, an outside call enters
+    /// serially, so overlapping outside callers do not queue on the pool together. Alone, so that
+    /// no other test's call holds the pool when the first call enters.
     #[test]
     #[cfg(all(threads, not(target_family = "wasm")))]
-    fn an_outside_call_enters_serially_while_another_outside_call_is_in_flight() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let _serial = counter_test_lock();
-        let busy = std::sync::Arc::new(AtomicBool::new(false));
-        let release = std::sync::Arc::new(AtomicBool::new(false));
-        let (b, done) = (busy.clone(), release.clone());
-        let h = std::thread::spawn(move || {
-            Pool(native::pool()).run(|_| {
-                b.store(true, Ordering::SeqCst);
-                assert!(wait_for(&done, 10), "the observer did not release the first call");
+    fn an_outside_call_enters_serially_while_another_outside_call_holds_the_pool() {
+        alone(30, || {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let busy = std::sync::Arc::new(AtomicBool::new(false));
+            let release = std::sync::Arc::new(AtomicBool::new(false));
+            let (b, done) = (busy.clone(), release.clone());
+            let h = std::thread::spawn(move || {
+                Pool(native::pool()).run(|parallel| {
+                    b.store(true, Ordering::SeqCst);
+                    assert!(wait_for(&done, 10), "the observer did not release the first call");
+                    parallel
+                })
             });
+            assert!(wait_for(&busy, 10), "the first outside call did not start");
+            let entered = Pool(native::pool()).enter();
+            let serial = matches!(entered, Enter::Serial);
+            drop(entered);
+            release.store(true, Ordering::SeqCst);
+            h.join().unwrap() && serial
         });
-        assert!(wait_for(&busy, 10), "the first outside call did not start");
-        let entered = Pool(native::pool()).enter();
-        let serial = matches!(entered, Enter::Serial);
-        drop(entered);
-        release.store(true, Ordering::SeqCst);
-        h.join().unwrap();
-        assert!(serial, "the second outside call queued on the pool");
     }
 
     /// An outside call that enters while only a serial outside call is still in flight (the
     /// pool-served one it raced with has ended) uses the pool: serial calls do not hold it, so two
-    /// outside threads reading at once keep the pool busy instead of both running serially, which
-    /// made two concurrent GeoParquet reads slower than one. Alone, so that no other test's work
-    /// holds the pool.
+    /// outside threads at work keep the pool busy with one call while the other runs serially.
+    /// Alone, so that no other test's work holds the pool.
     #[test]
     #[cfg(all(threads, not(target_family = "wasm")))]
     fn an_outside_call_uses_the_pool_while_only_a_serial_outside_call_is_in_flight() {
