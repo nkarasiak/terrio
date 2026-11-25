@@ -1482,8 +1482,8 @@ fn warn_integer_precision(data_type: DataType) {
 /// to `report`.
 ///
 /// GDAL 3.13.3 (`GDALDefaultOverviews::BuildOverviews`) first builds the levels the sidecar does
-/// not have (`GTIFFBuildOverviews`): together, block by block, when they are pixel-interleaved
-/// (compressed or with an alpha band); else band by band, which recomputes every level of the
+/// not have (`GTIFFBuildOverviews`): together, block by block, when they are compressed and
+/// pixel-interleaved, or with an alpha band; else band by band, which recomputes every level of the
 /// sidecar with them, the ones it had too, which keep their metadata. It then refreshes the
 /// requested levels the sidecar had, band by band (`GDALRegenerateOverviewsEx`): from full
 /// resolution, or each from the previous one for averages of a raster without a mask or alpha

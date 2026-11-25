@@ -2647,7 +2647,7 @@ sidecar's, where terrio orders them largest first.
 
 External average overviews follow GDAL 3.13.3's two passes (issue #1260). The
 levels the `.ovr` does not have are built first: compressed and
-pixel-interleaved, block by block, each from the previous level, whose pixels
+pixel-interleaved, or with an alpha band, block by block, each from the previous level, whose pixels
 GDAL weighs as masked (all valid in an `.ovr`) when the raster has an internal
 or `.msk` mask; else band by band, which recomputes every level of the `.ovr`
 with them (the levels it had keep their `RESAMPLING` item). Requested levels
