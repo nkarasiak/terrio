@@ -101,10 +101,9 @@ fn filtered_parquet_layer(path: &str, statement: &str, options: &crate::VectorOp
     let Some(mut reader) = readers.into_iter().find(|r| r.layer().name.eq_ignore_ascii_case(&select.from)) else {
         return Ok(None);
     };
-    // Only a clause the reader cannot bind falls back to the whole read; read errors surface. A
-    // remote file opened already is read whole from its stream rather than opened again.
+    // Only a clause the reader cannot bind falls back to the whole read; read errors surface.
     if filter.bind(&reader.layer().schema).is_err() {
-        return if remote { reader.read_all().map(Some) } else { Ok(None) };
+        return Ok(None);
     }
     reader.filter_attributes(filter)?;
     reader.read_all().map(Some)
