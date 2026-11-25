@@ -105,7 +105,8 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
     The first readable source gives the CRS. When none gives one but a `spatial_ref`,
     `crs_wkt`, `proj:` or `crs` value cannot be read, the error of the first such value is
     raised, so it does not read as no CRS. CF grid mapping parameters that cannot be read
-    give no CRS, as in rioxarray.
+    give no CRS, as in rioxarray; beside a `spatial_ref` or `crs_wkt` they are read through
+    pyproj only, which reads that value first.
 
     Args:
         obj: The object.
