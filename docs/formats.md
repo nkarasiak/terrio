@@ -243,7 +243,9 @@ creation option, from 1 (the least effort) to 9 (the most), 6 by default, and Zs
 (`ZSTD`, `LERC_ZSTD`) at `ZSTD_LEVEL`, from 1 to 22, 9 by default. `ZSTD_LEVEL` has an effect only
 with the `libzstd` feature: without it, as in the default build and in WebAssembly, Zstandard
 chunks are compressed at the one level their encoder has. A level out of range is refused,
-whatever the compression.
+whatever the compression. A COG also takes GDAL's COG option `LEVEL`, ahead of either: the Deflate
+level of `DEFLATE` and `LERC_DEFLATE`, the Zstandard level of `ZSTD` and `LERC_ZSTD`; other
+compressions ignore it, as GDAL does.
 
 `SPARSE_OK=YES` leaves out of a GeoTIFF the blocks of its full-resolution image whose samples are
 all nodata, or 0 without nodata, in every band the block holds: every band of the file, or, with

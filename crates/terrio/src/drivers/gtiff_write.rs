@@ -873,22 +873,29 @@ impl TiffOptions {
         if let Some(p) = co("PREDICTOR") {
             o.predictor = parse_predictor(p, cog)?;
         }
-        // The levels are checked whatever the compression, as the qualities are.
-        if let Some(v) = co("ZLEVEL") {
+        // The levels are checked whatever the compression, as the qualities are. GDAL's COG
+        // driver takes LEVEL as ZLEVEL for Deflate and as ZSTD_LEVEL for Zstandard, in their
+        // place (GDAL 3.13.3 `GDALCOGCreator::Create`); other codecs ignore it.
+        let compression = o.compression;
+        let level = |key: &'static str, codecs: [Compression; 2]| match co("LEVEL").filter(|_| cog && codecs.contains(&compression)) {
+            Some(v) => Some(("LEVEL", v)),
+            None => co(key).map(|v| (key, v)),
+        };
+        if let Some((key, v)) = level("ZLEVEL", [Compression::Deflate, Compression::LercDeflate]) {
             o.codec.deflate_level = v
                 .trim()
                 .parse::<u32>()
                 .ok()
                 .and_then(crate::deflate_compress::Level::new)
-                .ok_or_else(|| Error::InvalidArgument(format!("invalid ZLEVEL '{v}' (1 to 9)")))?;
+                .ok_or_else(|| Error::InvalidArgument(format!("invalid {key} '{v}' (1 to 9)")))?;
         }
-        if let Some(v) = co("ZSTD_LEVEL") {
+        if let Some((key, v)) = level("ZSTD_LEVEL", [Compression::Zstd, Compression::LercZstd]) {
             o.codec.zstd_level = v
                 .trim()
                 .parse::<i32>()
                 .ok()
                 .filter(|l| (1..=22).contains(l))
-                .ok_or_else(|| Error::InvalidArgument(format!("invalid ZSTD_LEVEL '{v}' (1 to 22)")))?;
+                .ok_or_else(|| Error::InvalidArgument(format!("invalid {key} '{v}' (1 to 22)")))?;
         }
         if let Some(v) = co("MAX_Z_ERROR") {
             o.codec.max_z_error = v
@@ -5919,6 +5926,43 @@ following conditions:
         ] {
             let error = encode_with(compression, &[(key, value)]).unwrap_err().to_string();
             assert!(error.contains(&format!("invalid {key} '{value}'")), "{error}");
+        }
+    }
+
+    /// A COG's `LEVEL` is its Deflate (DEFLATE, LERC_DEFLATE) or Zstandard (ZSTD, LERC_ZSTD)
+    /// level, as GDAL 3.13.3's COG driver takes it, ahead of `ZLEVEL` and `ZSTD_LEVEL`; other
+    /// codecs and GeoTIFFs ignore it.
+    #[test]
+    fn cog_level_is_the_deflate_or_zstd_level() {
+        // Text repeats differently enough for Deflate levels 1 and 9 and Zstandard levels 1 and 4
+        // to give other bytes.
+        let text = b"Permission is hereby granted, free of charge, to any person obtaining a copy of this software \
+            and associated documentation files, to deal in the Software without restriction, including without \
+            limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies.";
+        let cfg = wbraster::RasterConfig { cols: text.len(), rows: 4, bands: 1, data_type: DataType::U8, ..Default::default() };
+        let r = Raster::from_data_native(cfg, RasterData::U8(text.repeat(4))).unwrap();
+        let write = |compression: &str, cog: bool, co: &[(&str, &str)]| {
+            let options = crate::RasterWriteOptions {
+                compression: Some(compression.into()),
+                creation_options: co.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                ..Default::default()
+            };
+            TiffOptions::from_write_options(&options, cog, None).map(|o| encode(&r, &o.unwrap()).unwrap())
+        };
+        let cog = |compression: &str, co: &[(&str, &str)]| write(compression, true, co).unwrap();
+        assert_ne!(cog("DEFLATE", &[("ZLEVEL", "1")]), cog("DEFLATE", &[("ZLEVEL", "9")]));
+        for level in ["1", "9"] {
+            assert_eq!(cog("DEFLATE", &[("LEVEL", level)]), cog("DEFLATE", &[("ZLEVEL", level)]), "LEVEL={level}");
+        }
+        assert_eq!(cog("DEFLATE", &[("LEVEL", "1"), ("ZLEVEL", "9")]), cog("DEFLATE", &[("ZLEVEL", "1")]));
+        assert_ne!(cog("ZSTD", &[("ZSTD_LEVEL", "1")]), cog("ZSTD", &[("ZSTD_LEVEL", "4")]));
+        assert_eq!(cog("ZSTD", &[("LEVEL", "1"), ("ZSTD_LEVEL", "4")]), cog("ZSTD", &[("ZSTD_LEVEL", "1")]));
+        // A GeoTIFF has no LEVEL; LZW none, whatever its value.
+        assert_eq!(write("DEFLATE", false, &[("LEVEL", "1")]).unwrap(), write("DEFLATE", false, &[]).unwrap());
+        assert_eq!(cog("LZW", &[("LEVEL", "99")]), cog("LZW", &[]));
+        for (compression, value, range) in [("DEFLATE", "10", "1 to 9"), ("ZSTD", "23", "1 to 22")] {
+            let error = write(compression, true, &[("LEVEL", value)]).unwrap_err().to_string();
+            assert!(error.contains(&format!("invalid LEVEL '{value}' ({range})")), "{error}");
         }
     }
 
