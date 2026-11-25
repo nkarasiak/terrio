@@ -3613,6 +3613,13 @@ class DatasetWriter(DatasetReader):
         explicit_jp2_roles = (
             self._colorinterp_set or bool(inherited_associations)
         ) and _terrio.canonical_driver_name(driver) == "JP2"
+        # GDAL 3.13.3 ignores the interpretations set on the first three bands of a YCbCr
+        # GeoTIFF it creates: they read red, green and blue, where the writer, as GDAL's
+        # CreateCopy, keeps those other than Undefined.
+        ycbcr = (
+            _terrio.canonical_driver_name(driver) == "GTIFF"
+            and opts.get("PHOTOMETRIC", "").upper() == "YCBCR"
+        )
         for b in range(self._count):
             md: dict[str, Any] = {}
             if s.descriptions[b]:
@@ -3627,7 +3634,7 @@ class DatasetWriter(DatasetReader):
                 md["items"] = dict(s.band_tags[b])
             ci = s.colorinterp[b]
             if (ci != defaults[b] or explicit_jp2_roles) and not (
-                ci == ColorInterp.palette and s.colormap
+                (ci == ColorInterp.palette and s.colormap) or (ycbcr and b < 3)
             ):
                 md["color_interp"] = _tiff.COLOR_INTERP_NAMES.get(ci, "Undefined")
             if b < len(inherited_associations) and inherited_associations[b] is not None:

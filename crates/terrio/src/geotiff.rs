@@ -2261,6 +2261,36 @@ mod tests {
         }
     }
 
+    /// In YCbCr, given or a COG's JPEG default, the first three bands' colour interpretations
+    /// other than Undefined are kept, as GDAL 3.13.3 copies them; PHOTOMETRIC=RGB given overrides
+    /// them all.
+    #[test]
+    fn ycbcr_keeps_colour_interpretations_other_than_undefined() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = wbraster::RasterConfig { cols: 40, rows: 30, bands: 3, data_type: wbraster::DataType::U8, ..Default::default() };
+        let r = wbraster::Raster::from_data_native(cfg, wbraster::raster::RasterData::U8((0..3600).map(|i| (i % 251) as u8).collect()))
+            .unwrap();
+        use crate::formats::RasterDriver::{Cog, GTiff};
+        for (source, driver, photometric, expected) in [
+            (["Gray", "Undefined", "Undefined"], GTiff, Some("YCBCR"), ["Gray", "Green", "Blue"]),
+            (["Gray", "Undefined", "Undefined"], Cog, None, ["Gray", "Green", "Blue"]),
+            (["Blue", "Green", "Red"], GTiff, Some("YCBCR"), ["Blue", "Green", "Red"]),
+            (["Blue", "Green", "Red"], Cog, None, ["Blue", "Green", "Red"]),
+            (["Gray", "Undefined", "Undefined"], GTiff, Some("RGB"), ["Red", "Green", "Blue"]),
+        ] {
+            let mut ds = crate::RasterDataset::with_driver(r.clone(), GTiff, false);
+            ds.band_metadata = source.map(|c| crate::BandMetadata { color_interp: Some(c.into()), ..Default::default() }).to_vec();
+            let out = dir.path().join(format!("{source:?}-{driver:?}-{photometric:?}.tif")).to_str().unwrap().to_string();
+            let mut creation_options = vec![("COMPRESS".to_string(), "JPEG".to_string())];
+            creation_options.extend(photometric.map(|p| ("PHOTOMETRIC".to_string(), p.to_string())));
+            let options = crate::RasterWriteOptions { driver: Some(driver), creation_options, ..Default::default() };
+            crate::write_raster_dataset(&ds, &out, &options).unwrap();
+            let read = read_geotiff(std::path::Path::new(&out)).unwrap();
+            let names: Vec<&str> = (1..=3).map(|b| read.band_color_interp(b)).collect();
+            assert_eq!(names, expected, "{source:?} {driver:?} {photometric:?}");
+        }
+    }
+
     /// A structural tag libtiff cannot read (in a fuzzed file, ImageWidth retyped
     /// UNDEFINED) makes GDAL refuse the file at open: terrio refuses it there too, rather than
     /// spending minutes decoding what the crate made of it. Integer types are read.
