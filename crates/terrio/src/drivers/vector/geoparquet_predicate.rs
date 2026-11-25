@@ -180,8 +180,9 @@ mod tests {
         assert_eq!(remaining.features.iter().map(|f| f.fid).collect::<Vec<_>>(), (4..20).collect::<Vec<_>>());
     }
 
-    /// A query on a GeoParquet path filters its rows in the reader and gives what the same
-    /// query gives on the layer read whole, also when the reader cannot evaluate the clause.
+    /// A query on a GeoParquet file, local or remote, filters its rows in the reader and gives
+    /// what the same query gives on the layer read whole, also when the reader cannot evaluate
+    /// the clause.
     #[test]
     fn sql_on_a_path_matches_the_query_on_the_whole_layer() {
         let mut layer = Layer::new("t");
@@ -199,6 +200,17 @@ mod tests {
         let path = dir.path().join("t.parquet");
         let path = path.to_str().unwrap();
         super::super::write(&layer, path).unwrap();
+        // The file on disk, and served over HTTP (the remote reader).
+        #[allow(unused_mut)]
+        let mut sources = vec![path.to_string()];
+        #[cfg(remote)]
+        sources.push(format!("{}/t.parquet", crate::http::test_server(std::fs::read(path).unwrap()).0));
+        for path in &sources {
+            sql_on_a_source_matches_the_query_on_the_whole_layer(path);
+        }
+    }
+
+    fn sql_on_a_source_matches_the_query_on_the_whole_layer(path: &str) {
         let whole = crate::open_vector(path, &Default::default()).unwrap().into_resolved_layers();
         assert!(whole[0].features.iter().all(|feature| feature.geometry.is_some()));
         assert!(whole[0].crs.is_some());
@@ -221,14 +233,18 @@ mod tests {
                             .map(|f| (f.fid, f.geometry.as_ref().map(Geometry::to_wkb), f.attributes.clone()))
                             .collect::<Vec<_>>()
                     };
-                    assert_eq!(rows(&got), rows(&expected), "{statement}");
+                    assert_eq!(rows(&got), rows(&expected), "{path}: {statement}");
                     let crs = |layer: &Layer| layer.crs.as_ref().map(|crs| (crs.epsg, crs.wkt.clone()));
-                    assert_eq!(crs(&got), crs(&expected), "{statement}");
-                    assert_eq!(got.geom_type, expected.geom_type, "{statement}");
+                    assert_eq!(crs(&got), crs(&expected), "{path}: {statement}");
+                    assert_eq!(got.geom_type, expected.geom_type, "{path}: {statement}");
                 }
-                (Err(got), Err(expected)) => assert_eq!(got.to_string(), expected.to_string(), "{statement}"),
+                (Err(got), Err(expected)) => assert_eq!(got.to_string(), expected.to_string(), "{path}: {statement}"),
                 (got, expected) => {
-                    panic!("{statement}: got {:?}, expected {:?}", got.map(|l| l.features.len()), expected.map(|l| l.features.len()))
+                    panic!(
+                        "{path}: {statement}: got {:?}, expected {:?}",
+                        got.map(|l| l.features.len()),
+                        expected.map(|l| l.features.len())
+                    )
                 }
             }
         }
@@ -264,11 +280,17 @@ mod tests {
         // `id < 35 OR id >= 180`: groups 0..4 and 18..20.
         let kept: Vec<usize> = (0..4).chain(18..20).collect();
         for (budget, calls) in [(u64::MAX, 1), (id_chunk(0).1 * 2, 3)] {
-            let seen: Arc<Mutex<Vec<Vec<(u64, u64)>>>> = Arc::default();
+            // The ranges of each call to the prefetcher.
+            type Calls = Arc<Mutex<Vec<Vec<(u64, u64)>>>>;
+            let seen = Calls::default();
             let record = seen.clone();
+            let prefetch = move |r: &[(u64, u64)]| {
+                record.lock().unwrap().push(r.to_vec());
+                Ok(())
+            };
             let mut stream = ParquetStream::open(|| Ok(data.clone()), "t", None, None, 64, None, None)
                 .unwrap()
-                .with_prefetcher((Box::new(move |r: &[(u64, u64)]| Ok(record.lock().unwrap().push(r.to_vec()))), budget));
+                .with_prefetcher((Box::new(prefetch), budget));
             stream.filter_attributes(&Expression::parse("id < 35 OR id >= 180").unwrap()).unwrap();
             let seen = std::mem::take(&mut *seen.lock().unwrap());
             assert_eq!(seen.len(), calls, "budget {budget}");

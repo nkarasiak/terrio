@@ -54,11 +54,12 @@ pub fn query(layers: &[Layer], statement: &str) -> Result<Layer> {
     Ok(layer)
 }
 
-/// [`query`] on the layers of the vector dataset at `path`. A single-layer query on a local
-/// GeoParquet file passes its WHERE clause to the reader, which skips the row groups whose column
-/// statistics exclude it and decodes the other columns of matching rows only; feature IDs stay
-/// the file's. Other queries, remote files and other formats read their layers whole, as
-/// [`crate::open_vector`] does.
+/// [`query`] on the layers of the vector dataset at `path`. A single-layer query on a GeoParquet
+/// file, local or remote (a URL or `s3://`), passes its WHERE clause to the reader, which skips
+/// the row groups whose column statistics exclude it and decodes the other columns of matching
+/// rows only; feature IDs stay the file's. Remotely, the filter columns of the row groups kept
+/// are fetched together, then the other columns of the groups with matching rows. Other queries,
+/// archives and other formats read their layers whole, as [`crate::open_vector`] does.
 ///
 /// ```no_run
 /// let result = terrio::ops::sql::query_path(
