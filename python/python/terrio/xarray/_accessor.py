@@ -112,7 +112,7 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
         CRS | None: The CRS, or None when no source is present.
 
     Raises:
-        Exception: The first unreadable source's error, when no source can be read.
+        CRSError: The first unreadable source's error, when no source can be read.
     """
     error: Exception | None = None
 
@@ -2077,15 +2077,23 @@ class TerrioDataset(XRasterBase):
 
         Raises:
             RioXarrayError: If the variables' CRSs differ.
+            CRSError: If a CRS is present but cannot be read, from the Dataset when no
+                variable gives one, or from a variable.
         """
         if self._crs is not None:
             return None if self._crs is False else self._crs
-        crs = super().crs
+        error: Exception | None = None
+        try:
+            crs = super().crs
+        except Exception as e:  # noqa: BLE001 - the variables may still give one
+            crs, error = None, e
         if crs is not None:
             return crs
         crs_list = [self._obj[v].terrio.crs for v in self.vars]
         crs_list = [c for c in crs_list if c is not None]
         if not crs_list:
+            if error is not None:
+                raise error
             self._crs = False
             return None
         first: CRS = crs_list[0]

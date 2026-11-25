@@ -1189,19 +1189,31 @@ def test_unreadable_crs_raises_rather_than_reading_as_none(source, value):
 
 
 def test_unreadable_crs_falls_back_to_a_readable_source():
-    from terrio.rio.errors import CRSError
-
     da = _with_crs_in("spatial_ref", "GEOGCS[x]")
     da.spatial_ref.attrs["crs_wkt"] = "EPSG:4326"
     assert da.terrio.crs == "EPSG:4326"
     da = _with_crs_in("proj:wkt2", "GEOGCS[x]")
     da.attrs["crs"] = "EPSG:3857"
     assert da.terrio.crs == "EPSG:3857"
-    # When none reads, the first unreadable source's error is raised.
+
+
+def test_first_unreadable_crs_error_is_raised_when_none_reads():
+    from terrio.rio.errors import CRSError
+
     da = _with_crs_in("proj:wkt2", "GEOGCS[x]")
     da.attrs["crs"] = "EPSG:999999"
     with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
         _ = da.terrio.crs
-    # A Dataset reads the CRS of its variables the same way.
+
+
+def test_unreadable_dataset_crs_falls_back_to_its_variables_or_raises():
+    from terrio.rio.errors import CRSError
+
+    da = xr.DataArray(np.zeros((2, 2)), dims=("y", "x"), coords={"y": [1.0, 0.0], "x": [0.0, 1.0]})
+    proj = {"zarr_conventions": [{"name": "proj:"}], "proj:code": "EPSG:999999"}
+    ds = xr.Dataset({"v": da.assign_attrs(crs="EPSG:4326")}, attrs=proj)
+    assert ds.terrio.crs == "EPSG:4326"
+    with pytest.raises(CRSError, match="EPSG:999999"):
+        _ = xr.Dataset({"v": da}, attrs=proj).terrio.crs
     with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
         _ = _with_crs_in("spatial_ref", "GEOGCS[x]").to_dataset(name="v").terrio.crs
