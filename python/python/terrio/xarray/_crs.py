@@ -35,11 +35,15 @@ def crs_from_user_input(crs_input: Any) -> CRS:
     """A `terrio.rio.crs.CRS` from anything describing a CRS.
 
     Args:
-        crs_input: A CRS, an EPSG code, `EPSG:n`, WKT, a PROJ string, a dict of PROJ
-            parameters, or an object with a `to_wkt()` method (pyproj and rasterio CRSs).
+        crs_input: A CRS, an EPSG code (an int or a numpy integer), `EPSG:n`, WKT, a PROJ
+            string, a dict of PROJ parameters, or an object with a `to_wkt()` method (pyproj
+            and rasterio CRSs).
 
     Returns:
         CRS: The CRS.
+
+    Raises:
+        CRSError: If the input is not a CRS terrio can read.
     """
     if isinstance(crs_input, CRS):
         return crs_input

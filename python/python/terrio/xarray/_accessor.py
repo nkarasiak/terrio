@@ -282,10 +282,12 @@ class XRasterBase:
 
         Returns:
             CRS | None: The CRS, read from the grid mapping coordinate's `spatial_ref` or
-            `crs_wkt`, Zarr `proj:` attributes or a `crs` attribute.
+            `crs_wkt`, its CF grid mapping parameters, Zarr `proj:` attributes or a `crs`
+            attribute. CF parameters that cannot be read give no CRS.
 
         Raises:
-            CRSError: If one of these cannot be read and no source gives a CRS.
+            CRSError: If a `spatial_ref`, `crs_wkt`, `proj:` or `crs` value cannot be read and
+                no source gives a CRS.
         """
         if self._crs is not None:
             return None if self._crs is False else self._crs
