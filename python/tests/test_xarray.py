@@ -1188,6 +1188,12 @@ def test_unreadable_crs_raises_rather_than_reading_as_none(source, value):
     assert _with_crs_in(source, "EPSG:4326").terrio.crs == "EPSG:4326"
 
 
+@pytest.mark.parametrize("source", ["spatial_ref", "crs_wkt", "proj:code", "crs"])
+def test_numpy_integer_epsg_code_reads_as_rioxarray_reads_it(source):
+    for code in (np.int64(4326), np.int32(4326)):
+        assert _with_crs_in(source, code).terrio.crs == "EPSG:4326"
+
+
 def test_unreadable_crs_falls_back_to_a_readable_source():
     da = _with_crs_in("spatial_ref", "GEOGCS[x]")
     da.spatial_ref.attrs["crs_wkt"] = "EPSG:4326"
