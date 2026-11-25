@@ -1215,6 +1215,10 @@ fn plan(raster: &Raster, opts: &TiffOptions) -> Result<Plan> {
     // The colour interpretations GDAL reads from the photometric and extra samples written
     // (`GTiffRasterBand`): GDAL_METADATA holds only the bands' others (see [`geo_tags`]).
     let implied: Vec<&str> = (0..samples).map(|i| implied_color_interp(photometric, &extra, base_samples, i)).collect();
+    // GDAL 3.13.3 ignores the first three bands' colour interpretations under PHOTOMETRIC=RGB
+    // given, and every band's of YCbCr (`GTiffDataset::CreateCopy`,
+    // `GTIFFIsStandardColorInterpretation`): they read as red, green and blue.
+    let color_bands = if photometric == 6 || opts.photometric == Some(2) { 3 } else { 0 };
     let layout = Layout {
         tile,
         rows_per_strip: opts.rows_per_strip,
@@ -1244,7 +1248,7 @@ fn plan(raster: &Raster, opts: &TiffOptions) -> Result<Plan> {
         }
         _ => Vec::new(),
     };
-    let mut geo = geo_tags(raster, opts, &image_structure, &implied)?;
+    let mut geo = geo_tags(raster, opts, &image_structure, &implied, color_bands)?;
     if !opts.georeferenced || !opts.gcps.is_empty() || opts.geo_transform.is_some_and(|gt| !crate::is_north_up(&gt)) {
         geo.retain(|(tag, _)| !matches!(tag, 33550 | 33922));
     }
@@ -2174,8 +2178,14 @@ fn implied_color_interp(photometric: u16, extra: &[u16], base: usize, i: usize) 
 /// the written photometric and extra samples give the bands: as GDAL's
 /// `GTiffDataset::WriteMetadata`, only the bands' other colour interpretations go to
 /// GDAL_METADATA (GDAL 3.12.1 copies a gray or RGB file without it, and three gray Byte bands,
-/// written as RGB, with theirs).
-fn geo_tags(r: &Raster, opts: &TiffOptions, image_structure: &[(String, String)], implied: &[&str]) -> Result<Vec<(u16, Value)>> {
+/// written as RGB, with theirs), and none of the first `color_bands` bands'.
+fn geo_tags(
+    r: &Raster,
+    opts: &TiffOptions,
+    image_structure: &[(String, String)],
+    implied: &[&str],
+    color_bands: usize,
+) -> Result<Vec<(u16, Value)>> {
     let mut tags = vec![
         (33550, Value::Doubles(vec![r.cell_size_x, r.cell_size_y, 0.0])),
         (33922, Value::Doubles(vec![0.0, 0.0, 0.0, r.x_min, r.y_max(), 0.0])),
@@ -2213,7 +2223,7 @@ fn geo_tags(r: &Raster, opts: &TiffOptions, image_structure: &[(String, String)]
         .enumerate()
         .map(|(i, b)| {
             let mut b = b.clone();
-            if b.color_interp.as_deref().is_some_and(|c| implied.get(i).is_some_and(|m| m.eq_ignore_ascii_case(c))) {
+            if i < color_bands || b.color_interp.as_deref().is_some_and(|c| implied.get(i).is_some_and(|m| m.eq_ignore_ascii_case(c))) {
                 b.color_interp = None;
             }
             b
@@ -4240,7 +4250,7 @@ mod tests {
         let wkt = r#"local_cs ("site grid",UNIT["metre",1],AUTHORITY["EPSG","32615"])"#;
         let crs = crate::crs::SpatialRef::from_wkt(wkt).to_crs_info();
         let r = Raster::from_data(wbraster::RasterConfig { cols: 2, rows: 2, crs, ..Default::default() }, vec![1.0; 4]).unwrap();
-        let tags = geo_tags(&r, &Default::default(), &[], &[]).unwrap();
+        let tags = geo_tags(&r, &Default::default(), &[], &[], 0).unwrap();
         let Some(Value::Shorts(keys)) = tags.iter().find(|(tag, _)| *tag == 34735).map(|(_, value)| value) else { panic!() };
         let Some(Value::Ascii(ascii)) = tags.iter().find(|(tag, _)| *tag == 34737).map(|(_, value)| value) else { panic!() };
         let (entries, remainder) = keys[4..].as_chunks::<4>();
@@ -6273,20 +6283,23 @@ following conditions:
         let jpeg = crate::LazyRaster::from_tiff_bytes(bytes).unwrap().unwrap().header();
         assert_eq!((1..=3).map(|b| jpeg.band_color_interp(b)).collect::<Vec<_>>(), ["Red", "Green", "Blue"]);
 
+        // Under PHOTOMETRIC=RGB, band 1's Undefined is ignored, as GDAL ignores it; band 4's
+        // Alpha, which no extra sample implies, is kept in GDAL_METADATA.
         let r = layouts_raster(4, DataType::U8);
+        let undefined = crate::BandMetadata { color_interp: Some("Undefined".into()), ..Default::default() };
+        let alpha = crate::BandMetadata { color_interp: Some("Alpha".into()), ..Default::default() };
         let opts = TiffOptions {
             photometric: Some(2),
-            alpha: true,
-            band_metadata: vec![crate::BandMetadata { color_interp: Some("Undefined".into()), ..Default::default() }],
+            band_metadata: vec![undefined.clone(), undefined.clone(), undefined, alpha],
             ..Default::default()
         };
         let mut lazy = crate::LazyRaster::from_tiff_bytes(encode(&r, &opts).unwrap()).unwrap().unwrap();
         let header = lazy.header();
         assert!(header.raster.data.is_empty());
-        assert_eq!((1..=4).map(|b| header.band_color_interp(b)).collect::<Vec<_>>(), ["Undefined", "Green", "Blue", "Alpha"]);
+        assert_eq!((1..=4).map(|b| header.band_color_interp(b)).collect::<Vec<_>>(), ["Red", "Green", "Blue", "Alpha"]);
         let subset =
             lazy.read_window(crate::Window::new(1, 1, 2, 2), &crate::WindowOptions { bands: vec![4, 2, 1], ..Default::default() }).unwrap();
-        assert_eq!((1..=3).map(|b| subset.band_color_interp(b)).collect::<Vec<_>>(), ["Alpha", "Green", "Undefined"]);
+        assert_eq!((1..=3).map(|b| subset.band_color_interp(b)).collect::<Vec<_>>(), ["Alpha", "Green", "Red"]);
     }
 
     #[test]

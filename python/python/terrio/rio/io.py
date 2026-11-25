@@ -2912,6 +2912,7 @@ class DatasetWriter(DatasetReader):
             # GDAL's defaults: RGB for three or four Byte bands, the fourth as alpha.
             if "PHOTOMETRIC" not in out and self._dtype == "uint8" and self._count in (3, 4):
                 out["PHOTOMETRIC"] = "RGB"
+                self._default_rgb = True
                 if self._count == 4:
                     out.setdefault("ALPHA", "YES")
         return out
@@ -3048,6 +3049,7 @@ class DatasetWriter(DatasetReader):
             opts["INTERLEAVE"] = "BAND"
         if s.colorinterp[:3] == [ColorInterp.red, ColorInterp.green, ColorInterp.blue]:
             opts["PHOTOMETRIC"] = "RGB"
+            self._default_rgb = True
         if self.structure.alpha_band() is not None:
             opts["ALPHA"] = "YES"
         self._options = opts
@@ -3592,6 +3594,15 @@ class DatasetWriter(DatasetReader):
             except Exception as err:
                 raise RasterioIOError(f"Write failed: {err}") from err
         driver = self._out_driver
+        if getattr(self, "_default_rgb", False) and s.colorinterp[:3] != [
+            ColorInterp.red,
+            ColorInterp.green,
+            ColorInterp.blue,
+        ]:
+            # GDAL makes three or four Byte bands RGB unless PHOTOMETRIC is given, and MINISBLACK
+            # once their first three are set otherwise (`GTiffRasterBand::SetColorInterpretation`);
+            # the writer keeps those then, where it ignores them under a PHOTOMETRIC=RGB given.
+            self._options.pop("PHOTOMETRIC", None)
         opts = dict(self._options)
         compress = opts.pop("COMPRESS", None)
         band_md: list[dict[str, Any]] = []

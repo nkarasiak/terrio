@@ -2189,6 +2189,33 @@ mod tests {
         assert_eq!(names, ["Gray", "Undefined", "Undefined"]);
     }
 
+    /// Three Byte bands of Undefined colour interpretation written with PHOTOMETRIC=RGB or YCBCR
+    /// read as red, green and blue, as GDAL 3.13.3 writes them: the photometric given overrides the
+    /// source's colour interpretations, which are left out of GDAL_METADATA.
+    #[test]
+    fn rgb_and_ycbcr_photometrics_override_undefined_colour_interpretations() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = wbraster::RasterConfig { cols: 40, rows: 30, bands: 3, data_type: wbraster::DataType::U8, ..Default::default() };
+        let r = wbraster::Raster::from_data_native(cfg, wbraster::raster::RasterData::U8((0..3600).map(|i| (i % 251) as u8).collect()))
+            .unwrap();
+        let mut ds = crate::RasterDataset::with_driver(r, crate::formats::RasterDriver::GTiff, false);
+        ds.band_metadata = vec![crate::BandMetadata { color_interp: Some("Undefined".into()), ..Default::default() }; 3];
+        for driver in [crate::formats::RasterDriver::GTiff, crate::formats::RasterDriver::Cog] {
+            for (compress, photometric) in [("JPEG", "RGB"), ("JPEG", "YCBCR"), ("DEFLATE", "RGB")] {
+                let out = dir.path().join(format!("{driver:?}-{compress}-{photometric}.tif")).to_str().unwrap().to_string();
+                let options = crate::RasterWriteOptions {
+                    driver: Some(driver),
+                    creation_options: vec![("COMPRESS".into(), compress.into()), ("PHOTOMETRIC".into(), photometric.into())],
+                    ..Default::default()
+                };
+                crate::write_raster_dataset(&ds, &out, &options).unwrap();
+                let read = read_geotiff(std::path::Path::new(&out)).unwrap();
+                let names: Vec<&str> = (1..=3).map(|b| read.band_color_interp(b)).collect();
+                assert_eq!(names, ["Red", "Green", "Blue"], "{driver:?} {compress} {photometric}");
+            }
+        }
+    }
+
     /// A structural tag libtiff cannot read (in a fuzzed file, ImageWidth retyped
     /// UNDEFINED) makes GDAL refuse the file at open: terrio refuses it there too, rather than
     /// spending minutes decoding what the crate made of it. Integer types are read.
