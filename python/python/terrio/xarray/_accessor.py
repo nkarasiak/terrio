@@ -102,23 +102,36 @@ def _declared(attrs: Mapping[Hashable, Any], name: str) -> bool:
 def _read_crs(obj: XarrayObject) -> CRS | None:
     """The CRS of an object, from its grid mapping (CF), Zarr `proj:` or `crs` attributes.
 
+    The first readable source gives the CRS. When sources are present but none can be read,
+    the error of the first unreadable one is raised, so it does not read as no CRS.
+
     Args:
         obj: The object.
 
     Returns:
-        CRS | None: The CRS.
+        CRS | None: The CRS, or None when no source is present.
+
+    Raises:
+        Exception: The first unreadable source's error, when no source can be read.
     """
+    error: Exception | None = None
+
+    def parse(value: Any) -> CRS | None:
+        nonlocal error
+        try:
+            return crs_from_user_input(value)
+        except Exception as e:  # noqa: BLE001 - try the next source, raise if none reads
+            error = error or e
+            return None
+
     try:
         gm = obj.coords[obj.terrio.grid_mapping]
     except KeyError:
         gm = None
     if gm is not None:
         for key in ("spatial_ref", "crs_wkt"):
-            if key in gm.attrs:
-                try:
-                    return crs_from_user_input(gm.attrs[key])
-                except Exception:  # noqa: BLE001 - try the next source
-                    pass
+            if key in gm.attrs and (crs := parse(gm.attrs[key])) is not None:
+                return crs
         # CF grid mapping parameters, as rioxarray reads them through pyproj.CRS.from_cf.
         cf = crs_from_cf(gm.attrs)
         if cf is not None:
@@ -126,13 +139,12 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
     if _declared(obj.attrs, "proj:"):
         for key in ("proj:wkt2", "proj:code"):
             value = obj.attrs.get(key)
-            if value is not None:
-                try:
-                    return crs_from_user_input(value)
-                except Exception:  # noqa: BLE001 - try the next source
-                    pass
-    if "crs" in obj.attrs:
-        return crs_from_user_input(obj.attrs["crs"])
+            if value is not None and (crs := parse(value)) is not None:
+                return crs
+    if "crs" in obj.attrs and (crs := parse(obj.attrs["crs"])) is not None:
+        return crs
+    if error is not None:
+        raise error
     return None
 
 
@@ -268,6 +280,9 @@ class XRasterBase:
         Returns:
             CRS | None: The CRS, read from the grid mapping coordinate's `spatial_ref` or
             `crs_wkt`, Zarr `proj:` attributes or a `crs` attribute.
+
+        Raises:
+            CRSError: If a CRS is present but none of these can be read.
         """
         if self._crs is not None:
             return None if self._crs is False else self._crs

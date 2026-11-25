@@ -6,6 +6,7 @@ only.
 
 import gc
 import pickle
+import re
 import subprocess
 import sys
 import threading
@@ -1163,3 +1164,44 @@ def test_accessor_leaves_no_reference_cycle(kind):
         assert [n for n, r in refs.items() if r() is not None] == []
     finally:
         gc.enable()
+
+
+def _with_crs_in(source, value):
+    da = xr.DataArray(np.zeros((2, 2)), dims=("y", "x"), coords={"y": [1.0, 0.0], "x": [0.0, 1.0]})
+    if source in ("spatial_ref", "crs_wkt"):
+        da = da.assign_coords(spatial_ref=xr.DataArray(0, attrs={source: value}))
+        da.attrs["grid_mapping"] = "spatial_ref"
+    elif source in ("proj:wkt2", "proj:code"):
+        da.attrs.update({"zarr_conventions": [{"name": "proj:"}], source: value})
+    else:
+        da.attrs[source] = value
+    return da
+
+
+@pytest.mark.parametrize("source", ["spatial_ref", "crs_wkt", "proj:wkt2", "proj:code", "crs"])
+@pytest.mark.parametrize("value", ["GEOGCS[x]", "EPSG:999999"])
+def test_unreadable_crs_raises_rather_than_reading_as_none(source, value):
+    from terrio.rio.errors import CRSError
+
+    with pytest.raises(CRSError, match=re.escape(value)):
+        _ = _with_crs_in(source, value).terrio.crs
+    assert _with_crs_in(source, "EPSG:4326").terrio.crs == "EPSG:4326"
+
+
+def test_unreadable_crs_falls_back_to_a_readable_source():
+    from terrio.rio.errors import CRSError
+
+    da = _with_crs_in("spatial_ref", "GEOGCS[x]")
+    da.spatial_ref.attrs["crs_wkt"] = "EPSG:4326"
+    assert da.terrio.crs == "EPSG:4326"
+    da = _with_crs_in("proj:wkt2", "GEOGCS[x]")
+    da.attrs["crs"] = "EPSG:3857"
+    assert da.terrio.crs == "EPSG:3857"
+    # When none reads, the first unreadable source's error is raised.
+    da = _with_crs_in("proj:wkt2", "GEOGCS[x]")
+    da.attrs["crs"] = "EPSG:999999"
+    with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
+        _ = da.terrio.crs
+    # A Dataset reads the CRS of its variables the same way.
+    with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
+        _ = _with_crs_in("spatial_ref", "GEOGCS[x]").to_dataset(name="v").terrio.crs
