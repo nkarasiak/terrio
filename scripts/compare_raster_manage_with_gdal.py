@@ -501,14 +501,18 @@ def main():
 
             case(f"external overviews with a .msk sidecar, {name}", sidecar_overviews)
 
-        # External average overviews (issue #1260) of the internally masked DEM subset and of the
-        # DEM subset whose only mask is its nodata value (NaN): compressed levels of several
+        # External average overviews (issue #1260) of the internally masked DEM subset, of the
+        # DEM subset whose only mask is its nodata value (NaN) and of a Byte copy without nodata:
+        # compressed levels of several
         # factors, computed block by block from the previous level; and levels requested again,
         # which GDAL recomputes band by band after the new ones (uncompressed, those recompute
         # every level of the sidecar). Then a
         # DEM tiled to 10300 x 520 with an internal mask, wide enough that GDAL computes its
         # uncompressed levels block by block in the order the sidecar lists them, each from the
         # previous one only when that one is wider. Levels are compared by size.
+        # The issue's no-mask case: the DEM subset as Byte, without nodata.
+        plain = work / "plain-byte.tif"
+        gdal.Translate(str(plain), str(sample), outputType=gdal.GDT_Byte, scaleParams=[[]], noData="none")
         wide = work / "wide.tif"
         dem = gdal.Open(str(sample)).ReadAsArray().astype(np.float32)
         rows, cols = np.indices((520, 10300))
@@ -532,6 +536,8 @@ def main():
             ("internal mask, 3 5, then 2 3", masked, "NONE", [[3, 5], [2, 3]]),
             ("nodata, DEFLATE 3 5, then 2 3", sample, "DEFLATE", [[3, 5], [2, 3]]),
             ("nodata, 3 5, then 2 3", sample, "NONE", [[3, 5], [2, 3]]),
+            ("no mask, Byte, DEFLATE 3 5, then 2 3", plain, "DEFLATE", [[3, 5], [2, 3]]),
+            ("no mask, Byte, 3 5, then 2 3", plain, "NONE", [[3, 5], [2, 3]]),
             ("wide, internal mask, 2 8, then 2 4 8 16", wide, "NONE", [[2, 8], [2, 4, 8, 16]]),
         ]:
 
