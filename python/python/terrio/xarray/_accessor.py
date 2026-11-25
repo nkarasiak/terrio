@@ -102,14 +102,16 @@ def _declared(attrs: Mapping[Hashable, Any], name: str) -> bool:
 def _read_crs(obj: XarrayObject) -> CRS | None:
     """The CRS of an object, from its grid mapping (CF), Zarr `proj:` or `crs` attributes.
 
-    The first readable source gives the CRS. When sources are present but none can be read,
-    the error of the first unreadable one is raised, so it does not read as no CRS.
+    The first readable source gives the CRS. When none gives one but a `spatial_ref`,
+    `crs_wkt`, `proj:` or `crs` value cannot be read, the error of the first such value is
+    raised, so it does not read as no CRS. CF grid mapping parameters that cannot be read
+    give no CRS, as in rioxarray.
 
     Args:
         obj: The object.
 
     Returns:
-        CRS | None: The CRS, or None when no source is present.
+        CRS | None: The CRS, or None when no source gives one and none is unreadable.
 
     Raises:
         CRSError: The first unreadable source's error, when no source can be read.
@@ -283,7 +285,7 @@ class XRasterBase:
             `crs_wkt`, Zarr `proj:` attributes or a `crs` attribute.
 
         Raises:
-            CRSError: If a CRS is present but none of these can be read.
+            CRSError: If one of these cannot be read and no source gives a CRS.
         """
         if self._crs is not None:
             return None if self._crs is False else self._crs
