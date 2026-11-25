@@ -121,7 +121,7 @@ def _read_crs(obj: XarrayObject) -> CRS | None:
     def parse(value: Any) -> CRS | None:
         try:
             return crs_from_user_input(value)
-        except Exception:  # noqa: BLE001 - try the next source, raise if none reads
+        except CRSError:  # try the next source, raise if none reads
             unreadable.append(value)
             return None
 
