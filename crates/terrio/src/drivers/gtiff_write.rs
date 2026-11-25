@@ -876,13 +876,14 @@ impl TiffOptions {
         }
         // The levels are checked whatever the compression, as the qualities are. GDAL's COG
         // driver takes LEVEL as ZLEVEL for Deflate and as ZSTD_LEVEL for Zstandard, in their
-        // place (GDAL 3.13.3 `GDALCOGCreator::Create`); other codecs ignore it.
+        // place (GDAL 3.13.3 `GDALCOGCreator::Create`); other codecs ignore it. LEVEL, read last,
+        // wins.
         let compression = o.compression;
-        let level = |key: &'static str, codecs: [Compression; 2]| match co("LEVEL").filter(|_| cog && codecs.contains(&compression)) {
-            Some(v) => Some(("LEVEL", v)),
-            None => co(key).map(|v| (key, v)),
+        let levels = |key: &'static str, codecs: [Compression; 2]| {
+            let level = co("LEVEL").filter(|_| cog && codecs.contains(&compression));
+            co(key).map(|v| (key, v)).into_iter().chain(level.map(|v| ("LEVEL", v)))
         };
-        if let Some((key, v)) = level("ZLEVEL", [Compression::Deflate, Compression::LercDeflate]) {
+        for (key, v) in levels("ZLEVEL", [Compression::Deflate, Compression::LercDeflate]) {
             o.codec.deflate_level = v
                 .trim()
                 .parse::<u32>()
@@ -890,7 +891,7 @@ impl TiffOptions {
                 .and_then(crate::deflate_compress::Level::new)
                 .ok_or_else(|| Error::InvalidArgument(format!("invalid {key} '{v}' (1 to 9)")))?;
         }
-        if let Some((key, v)) = level("ZSTD_LEVEL", [Compression::Zstd, Compression::LercZstd]) {
+        for (key, v) in levels("ZSTD_LEVEL", [Compression::Zstd, Compression::LercZstd]) {
             o.codec.zstd_level = v
                 .trim()
                 .parse::<i32>()
@@ -5969,6 +5970,9 @@ following conditions:
             let error = write(compression, true, &[("LEVEL", value)]).unwrap_err().to_string();
             assert!(error.contains(&format!("invalid LEVEL '{value}' ({range})")), "{error}");
         }
+        // LEVEL replaces ZLEVEL and ZSTD_LEVEL, which are still checked.
+        assert!(write("DEFLATE", true, &[("LEVEL", "1"), ("ZLEVEL", "99")]).is_err());
+        assert!(write("ZSTD", true, &[("LEVEL", "1"), ("ZSTD_LEVEL", "99")]).is_err());
     }
 
     /// `ZLEVEL` reaches the Deflate encoder through each write of a GeoTIFF or COG: whole
