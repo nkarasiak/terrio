@@ -1223,6 +1223,11 @@ def test_unreadable_dataset_crs_falls_back_to_its_variables_or_raises():
         _ = xr.Dataset({"v": da}, attrs=proj).terrio.crs
     with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
         _ = _with_crs_in("spatial_ref", "GEOGCS[x]").to_dataset(name="v").terrio.crs
+    # A variable's unreadable CRS raises on every read, not only the first.
+    ds = _with_crs_in("proj:wkt2", "GEOGCS[x]").to_dataset(name="v")
+    for _ in range(2):
+        with pytest.raises(CRSError, match=r"GEOGCS\[x\]"):
+            _ = ds.terrio.crs
 
 
 @pytest.mark.parametrize("kind", ["DataArray", "Dataset"])

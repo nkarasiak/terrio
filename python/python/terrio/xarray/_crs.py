@@ -43,7 +43,8 @@ def crs_from_user_input(crs_input: Any) -> CRS:
         CRS: The CRS.
 
     Raises:
-        CRSError: If the input is not a CRS terrio can read.
+        CRSError: If the input is not a CRS terrio can read. An error from the object's own
+            `to_wkt()`, or a `to_wkt()` that returns no string, is not turned into one.
     """
     if isinstance(crs_input, CRS):
         return crs_input

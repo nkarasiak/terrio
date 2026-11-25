@@ -2077,6 +2077,9 @@ class TerrioDataset(XRasterBase):
     def crs(self) -> CRS | None:
         """The CRS of the Dataset (the same for all its variables).
 
+        The Dataset's own CRS comes first. When it is absent or cannot be read, the variables'
+        CRS is used.
+
         Returns:
             CRS | None: The CRS.
 
@@ -2094,6 +2097,8 @@ class TerrioDataset(XRasterBase):
             crs, unreadable = None, True
         if crs is not None:
             return crs
+        # Not "no CRS" yet: a variable's CRS may still be unreadable, and must raise on each read.
+        self._crs = None
         crs_list = [self._obj[v].terrio.crs for v in self.vars]
         crs_list = [c for c in crs_list if c is not None]
         if not crs_list:
