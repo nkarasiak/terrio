@@ -725,16 +725,53 @@ fn blosc_decompress(src: &[u8], most: usize) -> Result<Vec<u8>> {
     if flags & 0x02 != 0 {
         return copied(src.get(16..16 + nbytes).ok_or_else(|| bad("Blosc: truncated data"))?, "a Blosc chunk");
     }
-    let compressor = flags >> 5;
     let nblocks = nbytes.div_ceil(blocksize);
     let byte_shuffle = flags & 0x01 != 0 && typesize > 1;
     let bit_shuffle = flags & 0x01 == 0 && flags & 0x04 != 0;
     let mut out = crate::dataset::fallible::filled_now(nbytes, 0u8, "a Blosc chunk")?;
-    // The decompressed block before its unshuffle, and a bit shuffle's byte planes.
-    let scratch =
-        |shuffled: bool| crate::dataset::fallible::filled_now(if shuffled { blocksize.min(nbytes) } else { 0 }, 0u8, "a Blosc block");
-    let mut block = scratch(byte_shuffle || bit_shuffle)?;
-    let mut planes = scratch(bit_shuffle)?;
+    // The decompressed block before its unshuffle, and a bit shuffle's byte planes: this thread's,
+    // reused from chunk to chunk rather than allocated and zeroed for each.
+    let (mut block, mut planes) = BLOSC_SCRATCH.take();
+    let size = blocksize.min(nbytes);
+    for (buf, used) in [(&mut block, byte_shuffle || bit_shuffle), (&mut planes, bit_shuffle)] {
+        if used && buf.len() < size {
+            crate::dataset::fallible::reserve(buf, size - buf.len(), "a Blosc block")?;
+            buf.resize(size, 0);
+        }
+    }
+    let decoded = blosc_blocks(src, flags, typesize, blocksize, nblocks, (byte_shuffle, bit_shuffle), &mut out, &mut block, &mut planes);
+    // Kept for the next chunk only when small: a chunk of large blocks does not leave them held.
+    if block.capacity().max(planes.capacity()) <= BLOSC_SCRATCH_KEPT {
+        BLOSC_SCRATCH.set((block, planes));
+    }
+    decoded.map(|()| out)
+}
+
+/// The most bytes each of a thread's Blosc scratch blocks keeps between chunks.
+const BLOSC_SCRATCH_KEPT: usize = 1 << 20;
+
+thread_local! {
+    /// This thread's Blosc scratch blocks: see [`blosc_decompress`].
+    static BLOSC_SCRATCH: std::cell::Cell<(Vec<u8>, Vec<u8>)> = const { std::cell::Cell::new((Vec::new(), Vec::new())) };
+}
+
+/// Decompresses the `nblocks` blocks of a Blosc chunk `src` into `out`, unshuffling them
+/// (`shuffles`: byte, bit) through the scratch `block` and `planes`, at least a block long when
+/// used.
+#[allow(clippy::too_many_arguments)]
+fn blosc_blocks(
+    src: &[u8],
+    flags: u8,
+    typesize: usize,
+    blocksize: usize,
+    nblocks: usize,
+    (byte_shuffle, bit_shuffle): (bool, bool),
+    out: &mut [u8],
+    block: &mut [u8],
+    planes: &mut [u8],
+) -> Result<()> {
+    let compressor = flags >> 5;
+    let u32_at = |i: usize| src.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
     for (j, dst) in out.chunks_mut(blocksize).enumerate().take(nblocks) {
         let bsize = dst.len();
         let leftover = bsize < blocksize;
@@ -754,7 +791,7 @@ fn blosc_decompress(src: &[u8], most: usize) -> Result<Vec<u8>> {
             blosc_block(src, pos, nsplits, compressor, dst)?;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Decompresses the `nsplits` streams of a Blosc block, from offset `pos` of `src`, into `dst`,
@@ -804,7 +841,7 @@ fn blosc_block(src: &[u8], mut pos: usize, nsplits: usize, compressor: u8, dst: 
 fn interleave(planes: &[u8], out: &mut [u8], typesize: usize, n: usize) {
     fn fixed<const T: usize>(planes: &[u8], out: &mut [u8], n: usize) {
         let p: [&[u8]; T] = std::array::from_fn(|k| &planes[k * n..(k + 1) * n]);
-        for (e, item) in out[..n * T].chunks_exact_mut(T).enumerate() {
+        for (e, item) in out[..n * T].as_chunks_mut::<T>().0.iter_mut().enumerate() {
             for k in 0..T {
                 item[k] = p[k][e];
             }
@@ -845,9 +882,9 @@ fn bit_unshuffle(block: &[u8], out: &mut [u8], planes: &mut [u8], typesize: usiz
     let row = n / 8;
     for j in 0..typesize {
         let rows: [&[u8]; 8] = std::array::from_fn(|kk| &block[(j * 8 + kk) * row..(j * 8 + kk + 1) * row]);
-        for (g, dst) in planes[j * n..(j + 1) * n].chunks_exact_mut(8).enumerate() {
+        for (g, dst) in planes[j * n..(j + 1) * n].as_chunks_mut::<8>().0.iter_mut().enumerate() {
             let x = u64::from_le_bytes(std::array::from_fn(|kk| rows[kk][g]));
-            dst.copy_from_slice(&transpose_bits_8x8(x).to_le_bytes());
+            *dst = transpose_bits_8x8(x).to_le_bytes();
         }
     }
     interleave(planes, out, typesize, n);
