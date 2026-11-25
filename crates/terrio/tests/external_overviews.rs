@@ -578,12 +578,13 @@ fn an_ovr_msk_beside_a_base_msk_is_not_read_or_listed() {
 }
 
 /// Issue #1260, against `tests/data/ovr_rebuilds` (`scripts/make_ovr_rebuild_fixtures.py`, GDAL
-/// 3.13.3, `gdaladdo -ro -r average` once per step): every level of the `.ovr` has GDAL's data and
-/// mask, exactly. Compressed levels of several factors of a raster with an internal or `.msk`
-/// mask cascade, each weighing the previous level's pixels as masked, all valid; and a step that
-/// requests levels the `.ovr` has recomputes them from full resolution, after the new ones (band
-/// by band, every level of the `.ovr` with them). GDAL appends new levels to the `.ovr`, where
-/// terrio orders them largest first, so the levels are compared by size.
+/// 3.13.3, `gdaladdo -ro` once per step): every level of the `.ovr` has GDAL's data and mask,
+/// exactly. Compressed levels of several factors of a raster with an internal or `.msk` mask
+/// cascade, each weighing the previous level's pixels as masked, all valid; and a step that
+/// requests levels the `.ovr` has recomputes them band by band after the new ones (band by band,
+/// the new ones' pass recomputes every level of the `.ovr`, a nearest one as an average). GDAL
+/// appends new levels to the `.ovr`, where terrio orders them largest first, so the levels are
+/// compared by size.
 #[test]
 fn external_average_rebuilds_are_gdal_levels() {
     use terrio::ops::Resampling;
@@ -605,12 +606,13 @@ fn external_average_rebuilds_are_gdal_levels() {
         let mut steps = Vec::new();
         for step in case["steps"].as_array().unwrap() {
             let compression = step["compression"].as_str().unwrap().to_string();
+            let method = step["method"].as_str().unwrap();
             let levels: Vec<usize> = step["levels"].as_array().unwrap().iter().map(|l| l.as_u64().unwrap() as usize).collect();
-            steps.push(format!("{compression} {levels:?}"));
+            steps.push(format!("{method} {compression} {levels:?}"));
             let o = OverviewOptions {
                 external: true,
                 levels,
-                resampling: Resampling::Average,
+                resampling: if method == "nearest" { Resampling::Nearest } else { Resampling::Average },
                 compression: Some(compression),
                 ..Default::default()
             };

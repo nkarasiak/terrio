@@ -502,9 +502,10 @@ def main():
             case(f"external overviews with a .msk sidecar, {name}", sidecar_overviews)
 
         # External average overviews (issue #1260) of the internally masked DEM subset and of the
-        # unmasked one: compressed levels of several factors, computed block by block from the
-        # previous level; and levels requested again, which GDAL recomputes from full resolution
-        # after the new ones (band by band, uncompressed, with every level of the sidecar). Then a
+        # DEM subset whose only mask is its nodata value (NaN): compressed levels of several
+        # factors, computed block by block from the previous level; and levels requested again,
+        # which GDAL recomputes band by band after the new ones (uncompressed, those recompute
+        # every level of the sidecar). Then a
         # DEM tiled to 10300 x 520 with an internal mask, wide enough that GDAL computes its
         # uncompressed levels block by block in the order the sidecar lists them, each from the
         # previous one only when that one is wider. Levels are compared by size.
@@ -529,8 +530,8 @@ def main():
             ("internal mask, DEFLATE 2 4 8", masked, "DEFLATE", [[2, 4, 8]]),
             ("internal mask, DEFLATE 3 5, then 2 3", masked, "DEFLATE", [[3, 5], [2, 3]]),
             ("internal mask, 3 5, then 2 3", masked, "NONE", [[3, 5], [2, 3]]),
-            ("no mask, DEFLATE 3 5, then 2 3", sample, "DEFLATE", [[3, 5], [2, 3]]),
-            ("no mask, 3 5, then 2 3", sample, "NONE", [[3, 5], [2, 3]]),
+            ("nodata, DEFLATE 3 5, then 2 3", sample, "DEFLATE", [[3, 5], [2, 3]]),
+            ("nodata, 3 5, then 2 3", sample, "NONE", [[3, 5], [2, 3]]),
             ("wide, internal mask, 2 8, then 2 4 8 16", wide, "NONE", [[2, 8], [2, 4, 8, 16]]),
         ]:
 

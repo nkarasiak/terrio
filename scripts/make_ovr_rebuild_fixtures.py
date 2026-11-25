@@ -8,12 +8,13 @@ Usage:
 The sources are the issue's 67 x 45 Byte image: `plain.tif` without a mask, `masked.tif` with an
 internal per-dataset mask and `sidecar.tif` with the same mask in a `.msk` sidecar
 (`GDAL_TIFF_INTERNAL_MASK=NO`), which leaves out 7 x 7 blocks and scattered pixels. Each case
-copies a source and runs `gdaladdo -ro --config COMPRESS_OVERVIEW <compression> -r average` once
-per step. Compressed, GDAL computes a single band's new levels block by block, each from the
+copies a source and runs `gdaladdo -ro --config COMPRESS_OVERVIEW <compression> -r <method>` once
+per step (average unless a step names another method). Compressed, GDAL computes a single band's new levels block by block, each from the
 previous one, and weighs the previous level's pixels by its mask band, all valid in an `.ovr`,
 because the source has a mask. When a step requests levels the `.ovr` already has, GDAL builds
 the new ones first (uncompressed, band by band, it recomputes every level of the `.ovr` with
-them), then recomputes the requested existing ones band by band from full resolution.
+them), then recomputes the requested existing ones band by band: from full resolution, or each
+from the previous one for averages of a raster without a mask.
 
 `wide` is a 10300 x 520 Float32 raster in DEFLATE tiles of 256, with an internal mask, which
 `wide_masked_ovr_rebuilds_take_the_sidecar_order` writes the same way: so wide that band by band
@@ -51,6 +52,8 @@ CASES = [
     ("plain", [("NONE", [3, 5]), ("NONE", [2, 3])]),
     ("masked", [("DEFLATE", [3, 5]), ("DEFLATE", [2, 3])]),
     ("sidecar", [("NONE", [3, 5]), ("NONE", [2, 3])]),
+    # Band by band, the new level's pass recomputes the nearest level as an average.
+    ("masked", [("NONE", [2], "nearest"), ("NONE", [4])]),
 ]
 
 
@@ -130,10 +133,10 @@ def main() -> None:
             shutil.copyfile(OUT / f"{source}.tif", tif)
             if source == "sidecar":
                 shutil.copyfile(OUT / "sidecar.tif.msk", f"{tif}.msk")
-            for compression, levels in steps:
+            for compression, levels, *method in steps:
                 subprocess.run(
                     ["gdaladdo", "-q", "-ro", "--config", "COMPRESS_OVERVIEW", compression,
-                     "-r", "average", str(tif), *map(str, levels)],
+                     "-r", (method or ["average"])[0], str(tif), *map(str, levels)],
                     check=True,
                 )
             ds = gdal.Open(str(tif))
@@ -148,7 +151,7 @@ def main() -> None:
             ds = None
             cases.append({
                 "source": source,
-                "steps": [{"compression": c, "levels": lv} for c, lv in steps],
+                "steps": [{"compression": c, "levels": lv, "method": (m or ["average"])[0]} for c, lv, *m in steps],
                 "levels": levels,
             })
         wide_levels = wide(Path(tmp))

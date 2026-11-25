@@ -2650,19 +2650,23 @@ levels the `.ovr` does not have are built first: compressed and
 pixel-interleaved, block by block, each from the previous level, whose pixels
 GDAL weighs as masked (all valid in an `.ovr`) when the raster has an internal
 or `.msk` mask; else band by band, which recomputes every level of the `.ovr`
-with them. Requested levels the `.ovr` already had are then recomputed band by
-band from full resolution. Rasters so wide that GDAL computes a band's levels
-block by block take them in the order the `.ovr` lists them, each from the
-previous one only when it is wider. `tests/data/ovr_rebuilds`
+with them (the levels it had keep their `RESAMPLING` item). Requested levels
+the `.ovr` already had are then recomputed band by band: from full resolution,
+or each from the previous one for averages of a raster without a mask or alpha
+band. Rasters so wide that GDAL computes a band's levels block by block take
+them in the order the `.ovr` lists them, each from the previous one only when
+it is wider. `tests/data/ovr_rebuilds`
 (`scripts/make_ovr_rebuild_fixtures.py`) holds the issue's 67 by 45 Byte
 sources (no mask, internal mask, `.msk`) with six GDAL builds, and the digests
 of a 10,300 by 520 masked Float32 rebuild; `external_average_rebuilds_are_gdal_levels`
 and `wide_masked_ovr_rebuilds_take_the_sidecar_order` match their data and
 masks exactly, at every level, compared by size. A build that both adds levels
 and requests existing ones reads the full-resolution image twice, as GDAL does.
-Out of scope: an RGBA raster's requested existing levels, where GDAL cascades
-the alpha band on its own but not the colour bands, which terrio computes with
-one schedule; and internal overviews of a raster with a `.msk` sidecar.
+Known differences: an RGBA raster's requested existing levels, where GDAL
+cascades the alpha band on its own but not the colour bands, which terrio
+computes with one schedule; and, as terrio orders an `.ovr`'s levels largest
+first, a later build that recomputes them block by block in that order where
+GDAL's own sidecar lists them as appended.
 
 ```sh
 cargo test -p terrio --test external_overviews --test geotiff_nodata
