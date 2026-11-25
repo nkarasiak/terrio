@@ -1,7 +1,9 @@
 """The color interpretation `terrio.rio` writes (rasterio not needed).
 
 A dataset's color interpretation, set with `colorinterp`, copied by `shutil.copy` or kept by an
-update, reads back as it was set. Given no `PHOTOMETRIC`, which a COG never takes and an update
+update, reads back as it was set, but in YCbCr, as GDAL writes it: a GeoTIFF given
+`PHOTOMETRIC=YCBCR` reads back red, green and blue on its first three bands, and a COG of three
+JPEG Byte bands on those of them set `undefined`. Given no `PHOTOMETRIC`, which a COG never takes and an update
 passes only for an RGB file, the GeoTIFF writer gives three Byte bands, or four compressed with
 WebP, the red, green and blue interpretation unless told otherwise, as it does with
 `PHOTOMETRIC=YCBCR`; `terrio.rio` sends it each band whose interpretation differs from that.
