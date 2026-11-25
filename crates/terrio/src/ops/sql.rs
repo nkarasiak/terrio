@@ -57,9 +57,10 @@ pub fn query(layers: &[Layer], statement: &str) -> Result<Layer> {
 /// [`query`] on the layers of the vector dataset at `path`. A single-layer query on a GeoParquet
 /// file, local or remote (a URL or `s3://`), passes its WHERE clause to the reader, which skips
 /// the row groups whose column statistics exclude it and decodes the other columns of matching
-/// rows only; feature IDs stay the file's. Remotely, the filter columns of the row groups kept
-/// are fetched together, then the other columns of the groups with matching rows. Other queries,
-/// archives and other formats read their layers whole, as [`crate::open_vector`] does.
+/// rows only; feature IDs stay the file's. Remotely (with the `remote` feature), the filter
+/// columns of the row groups kept are fetched together, then the other columns of the groups with
+/// matching rows. Other queries, archives and other formats read their layers whole, as
+/// [`crate::open_vector`] does.
 ///
 /// ```no_run
 /// let result = terrio::ops::sql::query_path(
@@ -84,8 +85,8 @@ pub fn query_path(path: &str, statement: &str, options: &crate::VectorOpenOption
 fn filtered_parquet_layer(path: &str, statement: &str, options: &crate::VectorOpenOptions) -> Result<Option<Layer>> {
     let Ok(select) = Select::parse(statement) else { return Ok(None) };
     let Some(filter) = select.filter.as_ref().filter(|_| select.joins.is_empty()) else { return Ok(None) };
-    // A local file, or a remote one, whose predicate pass fetches the filter columns of its row
-    // groups together.
+    // Local files qualify, and remote ones: their predicate pass fetches the filter columns of
+    // the row groups together.
     let location = crate::vfs::Location::parse(path);
     #[cfg(remote)]
     let remote = location.remote().is_some();
@@ -100,9 +101,10 @@ fn filtered_parquet_layer(path: &str, statement: &str, options: &crate::VectorOp
     let Some(mut reader) = readers.into_iter().find(|r| r.layer().name.eq_ignore_ascii_case(&select.from)) else {
         return Ok(None);
     };
-    // Only a clause the reader cannot bind falls back to the whole read; read errors surface.
+    // Only a clause the reader cannot bind falls back to the whole read; read errors surface. A
+    // remote file opened already is read whole from its stream rather than opened again.
     if filter.bind(&reader.layer().schema).is_err() {
-        return Ok(None);
+        return if remote { reader.read_all().map(Some) } else { Ok(None) };
     }
     reader.filter_attributes(filter)?;
     reader.read_all().map(Some)

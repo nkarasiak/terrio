@@ -92,15 +92,15 @@ impl ParquetStream {
             (0..rg.num_columns()).filter(|&i| mask.leaf_included(i)).map(|i| rg.column(i).byte_range()).collect::<Vec<_>>()
         };
         let budget = self.windows.prefetch_budget();
-        let mut fetched = 0;
+        let mut announced = 0;
         for (k, (g, spatial)) in candidates.iter().cloned().enumerate() {
             if let Some(budget) = budget
-                && k == fetched
+                && k == announced
             {
                 let mut ranges = chunks(g);
                 let mut total: u64 = ranges.iter().map(|r| r.1).sum();
-                fetched += 1;
-                while let Some((next, _)) = candidates.get(fetched) {
+                announced += 1;
+                while let Some((next, _)) = candidates.get(announced) {
                     let more = chunks(*next);
                     let size: u64 = more.iter().map(|r| r.1).sum();
                     if total + size > budget {
@@ -108,7 +108,7 @@ impl ParquetStream {
                     }
                     total += size;
                     ranges.extend(more);
-                    fetched += 1;
+                    announced += 1;
                 }
                 self.windows.prefetch(&mut ranges)?;
             }
@@ -221,6 +221,7 @@ mod tests {
             "SELECT * FROM t WHERE FID >= 47",
             "SELECT COUNT(*) FROM t WHERE id > 20",
             "SELECT * FROM t WHERE missing > 1 OR id = 1",
+            "SELECT * FROM t WHERE ST_Area(geometry) = 0 AND id < 3",
             "SELECT * FROM t",
         ] {
             let expected = crate::ops::sql::query(&whole, statement);
@@ -279,7 +280,9 @@ mod tests {
         let id_chunk = |g: usize| meta.row_group(g).column(0).byte_range();
         // `id < 35 OR id >= 180`: groups 0..4 and 18..20.
         let kept: Vec<usize> = (0..4).chain(18..20).collect();
-        for (budget, calls) in [(u64::MAX, 1), (id_chunk(0).1 * 2, 3)] {
+        // Two of the largest kept chunks: the kept groups in pairs.
+        let pair = 2 * kept.iter().map(|&g| id_chunk(g).1).max().unwrap();
+        for (budget, calls) in [(u64::MAX, 1), (pair, 3)] {
             // The ranges of each call to the prefetcher.
             type Calls = Arc<Mutex<Vec<Vec<(u64, u64)>>>>;
             let seen = Calls::default();
@@ -315,7 +318,7 @@ mod tests {
         let rows = |l: &Layer| l.features.iter().map(|f| (f.fid, f.attributes.clone())).collect::<Vec<_>>();
         assert_eq!(rows(&remote), rows(&local));
         assert_eq!(remote.features.len(), 37);
-        // Only the 5 row groups that match are read, not the 20 of the file: a whole read would
+        // Only the 6 row groups whose statistics may match are read, not the 20 of the file: a whole read would
         // fetch the file's 1.6 MB of names.
         let fetched: usize = requests
             .lock()
@@ -349,9 +352,16 @@ mod tests {
         let meta = meta.into_builder().set_row_groups(vec![group]).build();
         // Keep the data pages intact but make their row count disagree with the footer.
         ParquetMetaDataWriter::new(&mut bytes, &meta).finish().unwrap();
-        std::fs::write(path, bytes).unwrap();
-        let error = crate::ops::sql::query_path(path, "SELECT * FROM t WHERE id < 7", &Default::default()).unwrap_err();
-        assert!(error.to_string().contains("predicate row count mismatch"), "{error}");
+        std::fs::write(path, &bytes).unwrap();
+        // On disk, and served over HTTP (the remote reader).
+        #[allow(unused_mut)]
+        let mut sources = vec![path.to_string()];
+        #[cfg(remote)]
+        sources.push(format!("{}/t.parquet", crate::http::test_server(bytes).0));
+        for path in &sources {
+            let error = crate::ops::sql::query_path(path, "SELECT * FROM t WHERE id < 7", &Default::default()).unwrap_err();
+            assert!(error.to_string().contains("predicate row count mismatch"), "{path}: {error}");
+        }
     }
 
     /// `IN` keeps a row group when one of its values may be in the group's range.

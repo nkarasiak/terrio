@@ -148,7 +148,8 @@ impl GroupWindows {
         self.prefetch.as_ref().map(|p| p.1)
     }
 
-    /// Announces `ranges` to the prefetcher, when there is one, which fetches them together.
+    /// Announces `ranges`, sorted in place, to the prefetcher, when there is one, which fetches
+    /// them together.
     pub(crate) fn prefetch(&self, ranges: &mut [(u64, u64)]) -> Result<()> {
         let Some((prefetch, _)) = &self.prefetch else { return Ok(()) };
         ranges.sort_unstable();
@@ -186,11 +187,9 @@ impl GroupWindows {
                 n += 1;
             }
             let window: Vec<(usize, Option<RowSelection>)> = self.groups.drain(..n).collect();
-            if let Some((prefetch, _)) = &self.prefetch {
+            if self.prefetch.is_some() {
                 let mut ranges: Vec<(u64, u64)> = window.iter().flat_map(|(g, _)| self.ranges[*g].iter().copied()).collect();
-                ranges.sort_unstable();
-                let _scope = self.context.enter()?;
-                prefetch(&ranges)?;
+                self.prefetch(&mut ranges)?;
             }
             let (decode, context) = (&self.decode, &self.context);
             for batches in crate::par::map_range_coarse(n, |i| {
