@@ -757,7 +757,7 @@ class GeoParquet:
                     for fname, ftype in (("id", ogr.OFTInteger64), ("value", ogr.OFTReal), ("class", ogr.OFTString), ("year", ogr.OFTInteger)):
                         lyr.CreateField(ogr.FieldDefn(fname, ftype))
                     defn = lyr.GetLayerDefn()
-                    classes = ["cropland", "grassland", "forest", "urban", "water", "wetland", "bare"]
+                    classes = ["shrubland", "grassland", "forest", "urban", "water", "wetland", "bare"]
                     values, years, cls = rng.gamma(2, 50, n), rng.integers(2000, 2026, n), rng.integers(0, 7, n)
                     nv = rng.integers(5, 24, n)
                     radius = rng.uniform(10, 80, n)
