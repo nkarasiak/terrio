@@ -157,7 +157,7 @@ Every operation that takes vector data (`zonal_stats` zones, `warp`'s `cutline`,
 takes it in any of these forms:
 
 ```python
-"zones.gpkg"; pathlib.Path("zones.gpkg")      # a file (a URL only as str: pathlib mangles //)
+"zones.gpkg"; pathlib.Path("zones.gpkg")        # a file (a URL only as str: pathlib mangles //)
 layer; dataset; [layer1, layer2]                # terrio Layers and VectorDatasets
 gdf; gdf.geometry; pyarrow_table                # GeoPandas objects, Arrow data (GeoArrow, WKB)
 shapely.box(0, 0, 1, 1); [geom1, geom2]         # Shapely geometries, alone or in a sequence
